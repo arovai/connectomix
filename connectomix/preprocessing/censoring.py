@@ -134,86 +134,6 @@ class TemporalCensor:
         
         self._logger.info(f"Dropped {n_volumes} initial volumes")
     
-    def apply_motion_censoring(self, confounds_df: pd.DataFrame) -> None:
-        """Apply motion-based censoring using framewise displacement.
-        
-        Args:
-            confounds_df: DataFrame with confounds (must include 'framewise_displacement')
-        """
-        if not self.config.motion_censoring.enabled:
-            return
-        
-        fd_threshold = self.config.motion_censoring.fd_threshold
-        if fd_threshold is None or fd_threshold <= 0:
-            return
-        
-        # Get framewise displacement column
-        if 'framewise_displacement' not in confounds_df.columns:
-            self._logger.warning("'framewise_displacement' not found in confounds")
-            return
-        
-        fd = confounds_df['framewise_displacement'].values
-        
-        # Handle NaN values
-        fd = np.nan_to_num(fd, nan=0.0)
-        
-        # Identify high-motion volumes
-        high_motion = fd > fd_threshold
-        n_censored = np.sum(high_motion)
-        
-        # Apply extension (censor surrounding volumes)
-        extend = self.config.motion_censoring.fd_extend
-        if extend > 0:
-            extended_mask = np.zeros(len(high_motion), dtype=bool)
-            for i in range(len(high_motion)):
-                if high_motion[i]:
-                    start = max(0, i - extend)
-                    end = min(len(high_motion), i + extend + 1)
-                    extended_mask[start:end] = True
-            high_motion = extended_mask
-            n_censored = np.sum(high_motion)
-        
-        # Update mask
-        self.mask &= ~high_motion
-        
-        for i, censored in enumerate(high_motion):
-            if censored:
-                self.censoring_log[i].append("motion")
-        
-        self._logger.info(
-            f"Motion censoring: removed {n_censored} volume(s) "
-            f"above FD threshold {fd_threshold} cm"
-        )
-    
-    def apply_segment_filtering(self, min_segment_length: int) -> None:
-        """Remove short contiguous segments of valid volumes.
-        
-        After motion censoring, removes segments shorter than min_segment_length
-        to ensure sufficient data for connectivity estimation.
-        
-        Args:
-            min_segment_length: Minimum segment length to keep
-        """
-        if min_segment_length <= 0:
-            return
-        
-        # Find contiguous segments of True values in mask
-        segments = np.split(np.where(self.mask)[0], 
-                           np.where(np.diff(np.where(self.mask)[0]) != 1)[0] + 1)
-        
-        # Remove short segments
-        for segment in segments:
-            if len(segment) < min_segment_length:
-                self.mask[segment] = False
-                for idx in segment:
-                    self.censoring_log[idx].append("short_segment")
-        
-        n_remaining = np.sum(self.mask)
-        self._logger.info(
-            f"Segment filtering: kept {n_remaining} volume(s) "
-            f"(min segment={min_segment_length})"
-        )
-    
     def apply_condition_selection(
         self,
         events_df: pd.DataFrame,
@@ -239,13 +159,56 @@ class TemporalCensor:
         """Get BIDS entity string representing censoring applied.
         
         Returns:
-            String like 'FD0.5mm' or None if no censoring applied
+            None (motion censoring not applicable in connectomix)
         """
-        fd_threshold = self.config.motion_censoring.fd_threshold
-        if fd_threshold and fd_threshold > 0:
-            # Convert cm to mm
-            return f"FD{fd_threshold * 10:.1f}mm"
+        # Motion censoring is handled upstream by fmridenoiser
         return None
+    
+    def apply_custom_mask(self, mask_file: Optional[Path]) -> None:
+        """Apply custom censoring mask from file.
+        
+        Args:
+            mask_file: Path to numpy or nifti mask file (optional)
+        """
+        if not mask_file:
+            return
+        
+        mask_file = Path(mask_file)
+        if not mask_file.exists():
+            self._logger.warning(f"Custom mask file not found: {mask_file}")
+            return
+        
+        try:
+            if mask_file.suffix == '.npy':
+                custom_mask = np.load(mask_file)
+            else:
+                # Assume nifti
+                import nibabel as nib
+                custom_img = nib.load(mask_file)
+                custom_mask = custom_img.get_fdata() > 0
+            
+            if len(custom_mask) != self.n_volumes:
+                self._logger.warning(
+                    f"Custom mask has {len(custom_mask)} volumes but data has "
+                    f"{self.n_volumes} volumes. Skipping."
+                )
+                return
+            
+            self.mask &= custom_mask
+            self._logger.info(f"Applied custom mask from: {mask_file.name}")
+        except Exception as e:
+            self._logger.warning(f"Failed to load custom mask: {e}")
+    
+    def validate(self) -> None:
+        """Validate that enough volumes remain after censoring."""
+        n_kept = np.sum(self.mask)
+        min_required = 10  # Arbitrary minimum for connectivity estimation
+        
+        if n_kept < min_required:
+            self._logger.warning(
+                f"Only {n_kept} volume(s) remain after censoring "
+                f"(minimum recommended: {min_required})"
+            )
     
     def apply_to_image(
         self,
