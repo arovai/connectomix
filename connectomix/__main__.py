@@ -151,17 +151,26 @@ def _configure_condition_masking(args, config: ParticipantConfig, logger: loggin
     if not has_conditions:
         return  # No condition-based masking specified
     
-    # Enable condition masking
+    # Enable condition masking in both config paths
+    # (condition_masking is the new primary config)
     config.condition_masking.enabled = True
     config.condition_masking.conditions = args.conditions
     logger.info(f"Condition-based masking enabled: {args.conditions}")
     
+    # Also enable temporal_censoring (required for _apply_temporal_censoring to run)
+    config.temporal_censoring.enabled = True
+    # Store conditions in legacy config path for backward compatibility
+    config.temporal_censoring.condition_selection = {
+        'enabled': True,
+        'conditions': args.conditions,
+    }
+    
     if hasattr(args, 'events_file') and args.events_file:
         config.condition_masking.events_file = args.events_file
-    
-    if hasattr(args, 'include_baseline') and args.include_baseline:
-        config.condition_masking.include_baseline = True
-        logger.info("  Including baseline periods")
+        # Also store in legacy config
+        config.temporal_censoring.condition_selection['events_file'] = args.events_file
+    else:
+        config.temporal_censoring.condition_selection['events_file'] = 'auto'
     
     if hasattr(args, 'transition_buffer') and args.transition_buffer > 0:
         config.condition_masking.transition_buffer = args.transition_buffer

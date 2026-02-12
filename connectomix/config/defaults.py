@@ -31,7 +31,6 @@ class ConditionMaskingConfig:
         enabled: Whether condition masking is enabled.
         events_file: Path to events TSV file, or "auto" to find from BIDS.
         conditions: List of condition names to include (empty = all).
-        include_baseline: Include timepoints not in any condition.
         transition_buffer: Seconds to exclude around condition boundaries.
         min_volumes_retained: Minimum number of volumes required per condition.
         min_fraction_retained: Minimum fraction of volumes required.
@@ -40,7 +39,6 @@ class ConditionMaskingConfig:
     enabled: bool = False
     events_file: Optional[str] = "auto"
     conditions: List[str] = field(default_factory=list)
-    include_baseline: bool = False
     transition_buffer: float = 0.0
     min_volumes_retained: int = 50
     min_fraction_retained: float = 0.3

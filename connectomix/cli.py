@@ -321,14 +321,6 @@ def create_parser() -> argparse.ArgumentParser:
     )
     
     censoring.add_argument(
-        "--include-baseline",
-        action="store_true",
-        dest="include_baseline",
-        help="When using --conditions, also compute connectivity for baseline "
-             "(timepoints not in any condition). Equivalent to adding 'baseline' to --conditions.",
-    )
-    
-    censoring.add_argument(
         "--transition-buffer",
         metavar="SEC",
         type=float,

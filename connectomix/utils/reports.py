@@ -861,14 +861,14 @@ class ParticipantReportGenerator:
         """Build BIDS-compliant figure filename with all entities.
         
         Pattern: sub-<label>[_ses-<session>][_task-<task>][_space-<space>][_denoise-<method>]
-                 [_method-<method>][_atlas-<atlas>][_desc-<desc>][_<figure_type>].<ext>
+                 [_condition-<condition>][_method-<method>][_atlas-<atlas>][_desc-<desc>][_<figure_type>].<ext>
         
         Args:
             figure_type: Type of figure (e.g., 'connectivity', 'histogram')
             desc: Description (e.g., 'correlation', 'covariance')
             
         Returns:
-            BIDS-compliant filename like: sub-01_task-rest_atlas-schaefer2018n100_desc-correlation_connectivity.png
+            BIDS-compliant filename like: sub-01_task-rest_condition-face_atlas-schaefer2018n100_desc-correlation_connectivity.png
         """
         # Extract subject ID from subject_id (which may be 'sub-01' or 'sub-01_ses-1_task-rest', etc.)
         if self.subject_id.startswith('sub-'):
@@ -893,6 +893,10 @@ class ParticipantReportGenerator:
         # Add denoising strategy
         if self.denoising_strategy and self.denoising_strategy != "none":
             filename_parts.append(f"denoise-{self.denoising_strategy}")
+        
+        # Add condition (if present)
+        if self.condition:
+            filename_parts.append(f"condition-{self.condition}")
         
         # Add method (analysis type)
         if hasattr(self.config, 'method') and self.config.method:
@@ -1491,18 +1495,17 @@ class ParticipantReportGenerator:
             return None
     
     def _build_censoring_section(self) -> str:
-        """Build temporal censoring section."""
+        """Build temporal masking section."""
         if self.censoring_summary is None or not self.censoring_summary.get('enabled', False):
             return ""
         
-        self.toc_items.append(("censoring", "Temporal Censoring"))
+        self.toc_items.append(("censoring", "Temporal Masking"))
         
         summary = self.censoring_summary
         n_original = summary.get('n_original', 0)
         n_retained = summary.get('n_retained', 0)
         n_censored = summary.get('n_censored', 0)
         fraction = summary.get('fraction_retained', 1.0)
-        reason_counts = summary.get('reason_counts', {})
         
         # Determine retention status color
         if fraction < 0.5:
@@ -1515,46 +1518,18 @@ class ParticipantReportGenerator:
             status_class = "badge-success"
             status_text = "Good Retention"
         
-        # Check if this is condition-based censoring
+        # Check if this is condition-based masking
         conditions = summary.get('conditions', {})
         has_conditions = len(conditions) > 0
         
-        # Description text varies based on censoring type
-        if has_conditions:
-            description = '''Temporal censoring was applied to select specific task conditions. 
-            Connectivity was computed separately for each condition using only the timepoints 
-            belonging to that condition.'''
-            retained_label = "Volumes Used (union of conditions)"
-        else:
-            description = '''Temporal censoring removes specific timepoints (volumes) from the fMRI data 
-            before connectivity analysis. This is useful for excluding high-motion frames 
-            or initial equilibration volumes.'''
-            retained_label = "Retained Volumes"
-        
-        # Check for warnings in the summary
-        warnings = summary.get('warnings', [])
-        warning_html = ""
-        if warnings:
-            warning_items = "".join(f"<li>{w}</li>" for w in warnings)
-            warning_html = f'''
-            <div class="warning-banner" style="background-color: #fef3c7; border: 2px solid #f59e0b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
-                <h3 style="color: #92400e; margin-top: 0;">⚠️ DATA QUALITY WARNING</h3>
-                <p style="color: #92400e; font-weight: bold;">The following issues were detected during temporal censoring:</p>
-                <ul style="color: #92400e; margin-bottom: 0;">
-                    {warning_items}
-                </ul>
-                <p style="color: #92400e; margin-bottom: 0; margin-top: 12px;">
-                    <strong>Recommendation:</strong> Results from analyses with very few volumes may be unreliable. 
-                    Consider relaxing censoring parameters, excluding problematic conditions, or interpreting these results with extreme caution.
-                </p>
-            </div>
-            '''
+        # Description for condition-based masking
+        description = '''Temporal masking selects specific task conditions for analysis. 
+        Connectivity was computed separately for each condition using only the timepoints 
+        belonging to that condition. Motion artifacts were removed during the denoising phase.'''
         
         html = f'''
         <div class="section" id="censoring">
-            <h2>⏱️ Temporal Censoring</h2>
-            
-            {warning_html}
+            <h2>⏱️ Temporal Masking</h2>
             
             <p>{description}</p>
             
@@ -1565,11 +1540,11 @@ class ParticipantReportGenerator:
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">{n_retained}</div>
-                    <div class="metric-label">{retained_label}</div>
+                    <div class="metric-label">Volumes in Conditions</div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">{n_censored}</div>
-                    <div class="metric-label">Excluded Volumes</div>
+                    <div class="metric-label">Not in Conditions</div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">{fraction:.1%}</div>
@@ -1578,65 +1553,11 @@ class ParticipantReportGenerator:
             </div>
         '''
         
-        # Censoring reasons breakdown (only if there are reasons from global censoring)
-        if reason_counts:
-            html += '''
-            <h3>Censoring Breakdown</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Reason</th>
-                        <th>Volumes Censored</th>
-                    </tr>
-                </thead>
-                <tbody>
-            '''
-            
-            reason_labels = {
-                'initial_drop': 'Initial volume drop (dummy scans)',
-                'custom_mask': 'Custom censoring mask',
-            }
-            
-            for reason, count in sorted(reason_counts.items()):
-                # Format reason for display
-                if reason.startswith('motion_fd>'):
-                    fd_thresh = reason.replace('motion_fd>', '')
-                    # fd_thresh may include a unit (e.g. '0.5cm') or be numeric
-                    try:
-                        # Try parse numeric part and show both cm and mm
-                        if fd_thresh.endswith('cm'):
-                            val = float(fd_thresh[:-2])
-                            mm_val = val * 10.0
-                            label = f'Motion censoring (FD > {val} cm ({mm_val:.2f} mm))'
-                        else:
-                            val = float(fd_thresh)
-                            mm_val = val * 10.0
-                            label = f'Motion censoring (FD > {val} cm ({mm_val:.2f} mm))'
-                    except Exception:
-                        # Fallback: display raw string
-                        label = f'Motion censoring (FD > {fd_thresh})'
-                else:
-                    label = reason_labels.get(reason, reason)
-                
-                html += f'''
-                    <tr>
-                        <td>{label}</td>
-                        <td>{count}</td>
-                    </tr>
-                '''
-            
-            html += '''
-                </tbody>
-            </table>
-            '''
-        
         # Condition-specific breakdown
-        conditions = summary.get('conditions', {})
         if conditions:
             html += '''
             <h3>Condition-Specific Volumes</h3>
-            <p>Connectivity was computed separately for each condition using only 
-            the timepoints belonging to that condition:</p>
+            <p>Connectivity was computed separately for each condition:</p>
             <table>
                 <thead>
                     <tr>
@@ -1665,27 +1586,28 @@ class ParticipantReportGenerator:
             </table>
             '''
         
-        # Create censoring visualization
-        censor_fig = self._create_censoring_plot()
-        if censor_fig is not None:
+        # Create temporal masking figure
+        masking_fig = self._create_temporal_masking_figure()
+        if masking_fig is not None:
             fig_id = self._get_unique_figure_id()
-            img_data = self._figure_to_base64(censor_fig)
-            saved_censor_path = self._save_figure_to_disk(censor_fig, 'censoring', 'temporal')
-            actual_censor_filename = saved_censor_path.name if saved_censor_path else 'censoring.png'
-            plt.close(censor_fig)
+            img_data = self._figure_to_base64(masking_fig)
+            saved_masking_path = self._save_figure_to_disk(masking_fig, 'masking', 'temporal')
+            actual_masking_filename = saved_masking_path.name if saved_masking_path else 'temporal_masking.png'
+            plt.close(masking_fig)
             
             html += f'''
-            <h3>Censoring Mask Visualization</h3>
+            <h3>Temporal Masking Visualization</h3>
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_censor_filename}')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_masking_filename}')">
                         ⬇️ Download
                     </button>
                 </div>
                 <div class="figure-caption">
-                    Figure: Temporal censoring masks showing which volumes are used for connectivity analysis.
-                    See legend for color coding.
+                    Figure: Temporal masking visualization showing retained (green) and masked (red) volumes.
+                    Green bars (#10b981) represent the {n_retained} included volumes.
+                    Red bars (#ef4444) represent the {n_censored} excluded volumes.
                 </div>
             </div>
             '''
@@ -1694,150 +1616,85 @@ class ParticipantReportGenerator:
         return html
     
     def _create_censoring_plot(self) -> Optional[plt.Figure]:
-        """Create temporal censoring visualization.
+        """Create temporal censoring visualization for condition-based masking.
         
-        When condition selection is active, shows a multi-row plot with:
-        1. Global censoring mask (motion, initial drop, etc.)
-        2. Each condition's mask
-        3. Combined/union mask
-        Otherwise shows the global censoring mask only.
+        Shows condition-specific masks only. Motion artifacts are handled during denoising.
         """
         if self.censoring_summary is None:
             return None
         
         try:
             conditions = self.censoring_summary.get('conditions', {})
-            global_mask = np.array(self.censoring_summary.get('mask', []))
-            global_censoring = self.censoring_summary.get('global_censoring', {})
+            mask = np.array(self.censoring_summary.get('mask', []), dtype=bool)
             
-            if len(global_mask) == 0:
+            if len(mask) == 0:
                 return None
             
-            n_volumes = len(global_mask)
+            n_volumes = len(mask)
             
-            # If conditions exist, show global + condition-specific masks
+            # Show condition-specific masks
             if conditions:
-                # Create multi-row figure: global + conditions + combined
-                n_rows = len(conditions) + 2  # +1 for global, +1 for combined
-                fig, axes = plt.subplots(n_rows, 1, figsize=(14, 1.5 * n_rows), 
-                                        sharex=True, squeeze=False)
+                # Create multi-row figure: one row per condition
+                n_rows = len(conditions)
+                figsize = (14, 1.5 * n_rows) if n_rows > 1 else (14, 2)
+                fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True, squeeze=False)
                 axes = axes.flatten()
                 
-                # Row 0: Global censoring mask (motion, initial drop)
-                ax = axes[0]
-                colors = np.zeros((1, n_volumes, 3))
-                colors[0, global_mask, :] = [0.3, 0.7, 0.9]   # Light blue for passed global
-                colors[0, ~global_mask, :] = [0.5, 0.5, 0.5]  # Gray for globally censored
-                
-                ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
-                ax.set_yticks([])
-                ax.set_ylabel('Global\n(motion)', fontsize=9, rotation=0, ha='right', va='center')
-                
-                global_retained = global_censoring.get('n_retained', int(np.sum(global_mask)))
-                global_frac = global_censoring.get('fraction_retained', global_retained/n_volumes)
-                ax.text(n_volumes * 0.98, 0.5, f'{global_retained}/{n_volumes} ({global_frac:.1%})',
-                       ha='right', va='center', fontsize=8,
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-                ax.set_title('Temporal Censoring Masks', fontsize=12, fontweight='bold')
-                
-                # Calculate combined mask (intersection of condition with global)
-                combined_mask = np.zeros(n_volumes, dtype=bool)
-                
-                # Rows 1 to N: Plot each condition
+                # Plot each condition
                 for idx, (cond_name, cond_info) in enumerate(sorted(conditions.items())):
-                    ax = axes[idx + 1]  # Offset by 1 for global row
+                    ax = axes[idx]
                     
-                    # Get the raw condition timing (before global mask intersection)
-                    raw_mask_data = cond_info.get('raw_mask', None)
-                    effective_mask_data = cond_info.get('mask', None)
+                    # Get condition mask if available
+                    cond_mask = cond_info.get('mask', np.zeros(n_volumes, dtype=bool))
+                    if isinstance(cond_mask, list):
+                        cond_mask = np.array(cond_mask, dtype=bool)
                     
-                    if raw_mask_data is not None:
-                        raw_cond_mask = np.array(raw_mask_data, dtype=bool)
-                    elif effective_mask_data is not None:
-                        # Fallback: use effective mask if raw not available
-                        raw_cond_mask = np.array(effective_mask_data, dtype=bool)
-                    else:
-                        # Last resort fallback
-                        n_vols = cond_info.get('n_volumes', 0)
-                        raw_cond_mask = np.zeros(n_volumes, dtype=bool)
-                        raw_cond_mask[:n_vols] = True
-                    
-                    # The effective mask is the intersection of raw condition AND global
-                    effective_mask = raw_cond_mask & global_mask
-                    n_effective = int(np.sum(effective_mask))
-                    effective_frac = n_effective / n_volumes
-                    
-                    # Create colors showing:
-                    # - Green: in condition AND passed global (actually used)
-                    # - Orange: in condition BUT failed global (would be used but censored)
-                    # - Light gray: not in condition
+                    # Create colors: green for in condition, gray for not
                     colors = np.zeros((1, n_volumes, 3))
-                    colors[0, :, :] = [0.85, 0.85, 0.85]  # Default: light gray (not in condition)
-                    colors[0, raw_cond_mask & ~global_mask, :] = [1.0, 0.6, 0.2]  # Orange: in condition but censored
-                    colors[0, effective_mask, :] = [0.2, 0.8, 0.2]  # Green: actually used
+                    colors[0, cond_mask, :] = [0.1, 0.7, 0.5]   # Green for in condition
+                    colors[0, ~cond_mask, :] = [0.85, 0.85, 0.85]  # Gray for not in condition
                     
                     ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
                     ax.set_yticks([])
-                    ax.set_ylabel(f'{cond_name}', fontsize=9, rotation=0, ha='right', va='center')
-                    ax.text(n_volumes * 0.98, 0.5, f'{n_effective}/{n_volumes} ({effective_frac:.1%})',
-                           ha='right', va='center', fontsize=8,
-                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                    ax.set_ylabel(f'{cond_name}', fontsize=10, rotation=0, ha='right', va='center', fontweight='bold')
                     
-                    # Combined is union of effective masks (what's actually used)
-                    combined_mask |= effective_mask
+                    # Add stats
+                    n_cond = int(np.sum(cond_mask))
+                    frac_cond = n_cond / n_volumes if n_volumes > 0 else 0
+                    ax.text(n_volumes * 0.98, 0.5, f'{n_cond}/{n_volumes} ({frac_cond:.1%})',
+                           ha='right', va='center', fontsize=9,
+                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
                 
-                # Last row: Show combined/union mask (what's actually used across all conditions)
-                ax = axes[-1]
-                colors = np.zeros((1, n_volumes, 3))
-                colors[0, combined_mask, :] = [0.2, 0.6, 0.9]   # Blue for actually used
-                colors[0, ~combined_mask, :] = [0.9, 0.2, 0.2]  # Red for excluded
-                
-                ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
-                ax.set_xlabel('Volume', fontsize=10)
-                ax.set_yticks([])
-                ax.set_ylabel('Combined', fontsize=9, rotation=0, ha='right', va='center')
-                
-                # Get actual combined stats from summary
-                total_retained = self.censoring_summary.get('n_retained', int(np.sum(combined_mask)))
-                frac_retained = self.censoring_summary.get('fraction_retained', total_retained/n_volumes)
-                ax.text(n_volumes * 0.98, 0.5, f'{total_retained}/{n_volumes} ({frac_retained:.1%})',
-                       ha='right', va='center', fontsize=8,
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                # Set labels
+                axes[-1].set_xlabel('Volume', fontsize=11, fontweight='bold')
+                axes[0].set_title('Temporal Masking by Condition', fontsize=13, fontweight='bold')
                 
                 # Add legend
                 from matplotlib.patches import Patch
                 legend_elements = [
-                    Patch(facecolor=[0.3, 0.7, 0.9], label='Passed motion check'),
-                    Patch(facecolor=[0.5, 0.5, 0.5], label='Failed motion check'),
-                    Patch(facecolor=[0.2, 0.8, 0.2], label='Used (in condition + passed motion)'),
-                    Patch(facecolor=[1.0, 0.6, 0.2], label='In condition but censored (motion)'),
-                    Patch(facecolor=[0.85, 0.85, 0.85], label='Not in condition'),
-                    Patch(facecolor=[0.2, 0.6, 0.9], label='Combined (any condition used)'),
-                    Patch(facecolor=[0.9, 0.2, 0.2], label='Excluded'),
+                    Patch(facecolor=[0.1, 0.7, 0.5], label='In Condition'),
+                    Patch(facecolor=[0.85, 0.85, 0.85], label='Not in Condition'),
                 ]
-                fig.legend(handles=legend_elements, loc='upper right', fontsize=7, 
-                          bbox_to_anchor=(0.99, 0.99), ncol=2)
+                fig.legend(handles=legend_elements, loc='upper right', fontsize=10,
+                          bbox_to_anchor=(0.99, 0.99))
                 
             else:
-                # Simple global mask plot
+                # Fallback: show simple binary mask
                 fig, ax = plt.subplots(figsize=(14, 2))
-                
-                # Create image representation of mask
                 colors = np.zeros((1, n_volumes, 3))
-                colors[0, global_mask, :] = [0.2, 0.8, 0.2]   # Green for retained
-                colors[0, ~global_mask, :] = [0.9, 0.2, 0.2]  # Red for censored
+                colors[0, mask, :] = [0.1, 0.7, 0.5]   # Green for retained
+                colors[0, ~mask, :] = [0.9, 0.2, 0.2]  # Red for masked
                 
                 ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
-                ax.set_xlabel('Volume', fontsize=10)
+                ax.set_xlabel('Volume', fontsize=11, fontweight='bold')
                 ax.set_yticks([])
                 ax.set_xlim(0, n_volumes)
-                ax.set_title('Temporal Censoring Mask', fontsize=12, fontweight='bold')
+                ax.set_title('Temporal Masking', fontsize=13, fontweight='bold')
                 
-                # Add text summary
-                n_retained = np.sum(global_mask)
+                n_retained = int(np.sum(mask))
                 ax.text(n_volumes * 0.98, 0.5, f'{n_retained}/{n_volumes} retained',
-                       ha='right', va='center', fontsize=9,
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                       ha='right', va='center', fontsize=10,
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
             
             plt.tight_layout()
             return fig
@@ -1845,6 +1702,140 @@ class ParticipantReportGenerator:
         except Exception as e:
             logger.warning(f"Could not create censoring plot: {e}")
             return None
+    
+    def _create_temporal_masking_figure(self) -> Optional[plt.Figure]:
+        """Create temporal masking visualization with specified design.
+        
+        Generates a figure showing retained vs. masked volumes using:
+        - Green (#10b981) for retained volumes
+        - Red (#ef4444) for masked volumes
+        - 14" × variable height figure (1 row if no conditions, multiple if conditions)
+        - axvspan() rendering with semi-transparent fill (alpha=0.7)
+        - No y-axis ticks (categorical visualization)
+        """
+        if self.censoring_summary is None:
+            return None
+        
+        try:
+            mask = np.array(self.censoring_summary.get('mask', []), dtype=bool)
+            conditions = self.censoring_summary.get('conditions', {})
+            
+            if len(mask) == 0:
+                return None
+            
+            n_volumes = len(mask)
+            
+            # Define colors
+            color_retained = '#10b981'    # Green for retained
+            color_masked = '#ef4444'      # Red for masked
+            alpha = 0.7                   # Semi-transparent fill
+            
+            # If conditions exist, show multiple rows (one per condition)
+            if conditions:
+                n_rows = len(conditions)
+                figsize = (14, 1.5 * n_rows) if n_rows > 1 else (14, 2.5)
+                fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True, squeeze=False)
+                axes = axes.flatten()
+                
+                # Plot each condition
+                for idx, (cond_name, cond_info) in enumerate(sorted(conditions.items())):
+                    ax = axes[idx]
+                    cond_mask = np.array(cond_info.get('mask', []), dtype=bool)
+                    
+                    # Use axvspan() for each contiguous region
+                    i = 0
+                    while i < n_volumes:
+                        current_status = cond_mask[i]
+                        start = i
+                        
+                        # Find consecutive volumes with same status
+                        while i < n_volumes and cond_mask[i] == current_status:
+                            i += 1
+                        
+                        # Draw span for this group
+                        color = color_retained if current_status else color_masked
+                        ax.axvspan(start - 0.5, i - 0.5, alpha=alpha, color=color, linewidth=0)
+                    
+                    # Styling
+                    ax.set_xlim(-0.5, n_volumes - 0.5)
+                    ax.set_ylim(0, 1)
+                    ax.set_yticks([])
+                    ax.set_ylabel(cond_name, fontsize=11, fontweight='bold', rotation=0, ha='right', va='center')
+                    
+                    # Stats
+                    n_cond = int(np.sum(cond_mask))
+                    ax.text(n_volumes * 0.98, 0.5, f'{n_cond}/{n_volumes}',
+                           ha='right', va='center', fontsize=9,
+                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
+                
+                # Labels
+                axes[-1].set_xlabel('Volume', fontsize=12, fontweight='bold')
+                axes[0].set_title('Temporal Masking by Condition', fontsize=13, fontweight='bold')
+                
+                # Legend
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor=color_retained, alpha=alpha, label='In Condition'),
+                    Patch(facecolor=color_masked, alpha=alpha, label='Not in Condition'),
+                ]
+                fig.legend(handles=legend_elements, loc='upper right', fontsize=10,
+                          bbox_to_anchor=(0.99, 0.99))
+                
+            else:
+                # Single plot: combined mask or global
+                fig, ax = plt.subplots(figsize=(14, 2.5))
+                
+                # Use axvspan() for each volume interval
+                i = 0
+                while i < n_volumes:
+                    current_status = mask[i]
+                    start = i
+                    
+                    # Find consecutive volumes with same status
+                    while i < n_volumes and mask[i] == current_status:
+                        i += 1
+                    
+                    # Draw span for this group
+                    color = color_retained if current_status else color_masked
+                    ax.axvspan(start - 0.5, i - 0.5, alpha=alpha, color=color, linewidth=0)
+                
+                # Set axis properties
+                ax.set_xlim(-0.5, n_volumes - 0.5)
+                ax.set_ylim(0, 1)
+                ax.set_xlabel('Volume', fontsize=12, fontweight='bold')
+                ax.set_yticks([])  # No y-axis ticks (categorical, not quantitative)
+                ax.set_xticks([0, n_volumes // 4, n_volumes // 2, 3 * n_volumes // 4, n_volumes - 1])
+                ax.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+                
+                # Add statistics text
+                n_retained = np.sum(mask)
+                n_masked = n_volumes - n_retained
+                pct_retained = 100.0 * n_retained / n_volumes
+                
+                # Title with statistics
+                title_text = f'Temporal Masking: {n_retained}/{n_volumes} volumes retained ({pct_retained:.1f}%)'
+                ax.set_title(title_text, fontsize=13, fontweight='bold', pad=10)
+                
+                # Add a subtle frame
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['left'].set_visible(False)
+                
+                # Add legend
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor=color_retained, alpha=alpha, label=f'Retained ({n_retained})'),
+                    Patch(facecolor=color_masked, alpha=alpha, label=f'Masked ({n_masked})')
+                ]
+                ax.legend(handles=legend_elements, loc='upper right', fontsize=10, framealpha=0.95)
+            
+            plt.tight_layout()
+            return fig
+            
+        except Exception as e:
+            logger.warning(f"Could not create temporal masking figure: {e}")
+            return None
+    
     
     def _build_connectivity_section(self) -> str:
         """Build connectivity results section."""

@@ -138,18 +138,22 @@ class TemporalCensor:
         self,
         events_df: pd.DataFrame,
         conditions: Optional[List[str]] = None,
+        masking_config: Optional[object] = None,
     ) -> None:
         """Select volumes belonging to specific experimental conditions.
         
         Args:
             events_df: BIDS events DataFrame
             conditions: List of condition names to select (all if None)
+            masking_config: ConditionMaskingConfig instance (optional, for transition_buffer)
         """
         if conditions is None or len(conditions) == 0:
             return
         
         # Use ConditionMasker to create condition-specific masks
-        masker = ConditionMasker(self.config, self.n_volumes, self.tr, self._logger)
+        # masking_config should be used if provided, otherwise fall back to self.config
+        config_for_masker = masking_config if masking_config is not None else self.config
+        masker = ConditionMasker(config_for_masker, self.n_volumes, self.tr, self._logger)
         masker.apply_condition_selection(events_df, conditions)
         
         self.condition_masks = masker.condition_masks
@@ -246,13 +250,26 @@ class TemporalCensor:
         """Get summary of censoring applied.
         
         Returns:
-            Dictionary with censoring statistics
+            Dictionary with censoring statistics and condition information
         """
-        n_kept = np.sum(self.mask)
+        # If conditions are selected, use the UNION of condition masks for visualization
+        # Otherwise use the global mask
+        if self.condition_masks:
+            # Calculate combined mask (union of all condition masks)
+            display_mask = np.zeros(self.n_volumes, dtype=bool)
+            for cond_mask in self.condition_masks.values():
+                display_mask |= cond_mask
+        else:
+            # Use global mask (no conditions selected)
+            display_mask = self.mask.copy()
+        
+        n_kept = np.sum(display_mask)
         n_censored = self.n_volumes - n_kept
         fraction_kept = n_kept / self.n_volumes if self.n_volumes > 0 else 0.0
         
-        return {
+        summary = {
+            'enabled': True,
+            'mask': display_mask.tolist(),  # Mask for visualization (union of conditions or global)
             'n_original': self.n_volumes,
             'n_retained': int(n_kept),
             'n_censored': int(n_censored),
@@ -260,3 +277,16 @@ class TemporalCensor:
             'duration_retained_sec': float(n_kept * self.tr),
             'duration_censored_sec': float(n_censored * self.tr),
         }
+        
+        # Add condition information if present
+        if self.condition_masks:
+            summary['conditions'] = {
+                condition: {
+                    'n_volumes': int(np.sum(mask)),
+                    'duration_sec': float(np.sum(mask) * self.tr),
+                    'mask': mask.tolist(),  # Include per-condition mask for reports
+                }
+                for condition, mask in self.condition_masks.items()
+            }
+        
+        return summary

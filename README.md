@@ -779,9 +779,6 @@ temporal_censoring:
   condition_selection:
     enabled: true
     conditions: ["face", "house"]
-  motion_censoring:
-    enabled: true
-    fd_threshold: 0.5
 ```
 
 ### Denoising Strategies
@@ -1078,13 +1075,7 @@ Connectomix will automatically resample if subjects have different geometries.
 | `drop_initial_volumes` | int | 0 | Dummy scans to drop |
 | `condition_selection.enabled` | bool | false | Enable condition selection |
 | `condition_selection.conditions` | list | [] | Conditions to include |
-| `condition_selection.include_baseline` | bool | false | Include baseline |
 | `condition_selection.transition_buffer` | float | 0 | Buffer (seconds) |
-| `motion_censoring.enabled` | bool | false | Enable FD censoring |
-| `motion_censoring.fd_threshold` | float | 0.5 | FD threshold (cm) — fMRIPrep reports FD in cm (e.g., 0.5 = 0.5 cm = 5 mm) |
-| `motion_censoring.extend_before` | int | 0 | Extend before |
-| `motion_censoring.extend_after` | int | 0 | Extend after |
-| `motion_censoring.min_segment_length` | int | 0 | Min contiguous segment length (scrub); 0=disabled |
 | `min_volumes_retained` | int | 50 | Minimum volumes |
 | `min_fraction_retained` | float | 0.3 | Minimum fraction |
 

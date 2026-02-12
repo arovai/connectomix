@@ -119,6 +119,14 @@ def run_participant_pipeline(
         # Create BIDS layout
         layout = create_bids_layout(bids_dir, derivatives, logger)
         
+        # Validate condition masking requirements
+        _validate_condition_masking_setup(
+            config=config,
+            bids_dir=bids_dir,
+            layout=layout,
+            logger=logger,
+        )
+        
         # Validate requested participant labels exist in dataset
         available_subjects = set(layout.get_subjects())
         if config.subject:
@@ -491,22 +499,21 @@ def _build_cli_command(
     if config.method in ["roiToRoi", "seedToSeed"] and config.atlas:
         parts.append(f"--atlas {config.atlas}")
     
-    # Add temporal censoring options if enabled
+    # Add temporal censoring and condition masking options
     if config.temporal_censoring.enabled:
         tc = config.temporal_censoring
         
         if tc.drop_initial_volumes > 0:
             parts.append(f"--drop-initial {tc.drop_initial_volumes}")
-        
-        if tc.motion_censoring.enabled and tc.motion_censoring.fd_threshold:
-            parts.append(f"--fd-threshold {tc.motion_censoring.fd_threshold}")
-            extend = tc.motion_censoring.extend_before or tc.motion_censoring.extend_after
-            if extend > 0:
-                parts.append(f"--fd-extend {extend}")
-        
-        if tc.condition_selection.enabled and tc.condition_selection.conditions:
-            conditions_str = " ".join(tc.condition_selection.conditions)
-            parts.append(f"--conditions {conditions_str}")
+    
+    # Add condition masking options (from condition_masking config - primary)
+    if config.condition_masking.enabled and config.condition_masking.conditions:
+        conditions_str = " ".join(config.condition_masking.conditions)
+        parts.append(f"--conditions {conditions_str}")
+    
+    # Add transition buffer if condition masking is enabled
+    if config.condition_masking.enabled and config.condition_masking.transition_buffer > 0:
+        parts.append(f"--transition-buffer {config.condition_masking.transition_buffer}")
     
     # Add label if set
     if config.label:
@@ -739,22 +746,24 @@ def _apply_temporal_censoring(
     if config.temporal_censoring.drop_initial_volumes > 0:
         censor.apply_initial_drop()
     
-    # Apply motion censoring
-    if config.temporal_censoring.motion_censoring.enabled:
-        # Try to find confounds file from the original BIDS dataset
-        # (since confounds are not in fmridenoiser output)
-        logger.warning(
-            "Motion censoring requested, but connectomix operates on denoised data "
-            "from fmridenoiser. Motion metrics are not available in fmridenoiser output. "
-            "Skipping motion censoring."
-        )
-    
     # Apply condition selection
-    if config.temporal_censoring.condition_selection.enabled:
+    # Check both condition_masking (new) and temporal_censoring.condition_selection (legacy)
+    conditions_to_apply = None
+    events_file_path = None
+    
+    if config.condition_masking.enabled and config.condition_masking.conditions:
+        # New condition_masking config (from CLI)
+        conditions_to_apply = config.condition_masking.conditions
+        events_file_path = config.condition_masking.events_file
+    elif config.temporal_censoring.condition_selection.get('enabled', False):
+        # Legacy temporal_censoring config
         cs = config.temporal_censoring.condition_selection
-        
+        conditions_to_apply = cs.get('conditions', [])
+        events_file_path = cs.get('events_file', 'auto')
+    
+    if conditions_to_apply:
         # Find events file using BIDSLayout
-        if cs.events_file == "auto":
+        if events_file_path == "auto" or events_file_path is None:
             events_path = find_events_file(func_path, layout, logger)
             if events_path is None:
                 raise PreprocessingError(
@@ -762,15 +771,14 @@ def _apply_temporal_censoring(
                     f"Please specify --events-file or place events.tsv in BIDS structure."
                 )
         else:
-            events_path = Path(cs.events_file)
+            events_path = Path(events_file_path)
         
         # Load events
         events_df = load_events_file(events_path, logger)
         logger.info(f"Loaded events file: {events_path.name}")
         
-        # Apply condition selection
-        censor.apply_condition_selection(events_df)
-    
+        # Apply condition selection with masking config for transition_buffer
+        censor.apply_condition_selection(events_df, conditions_to_apply, config.condition_masking)
     # Apply custom mask if provided
     if config.temporal_censoring.custom_mask_file:
         censor.apply_custom_mask(config.temporal_censoring.custom_mask_file)
@@ -1367,3 +1375,99 @@ def _compute_connectivity(
         raise ConnectomixError(f"Unknown method: {method}")
     
     return output_paths, connectivity_matrices, roi_names
+
+
+def _validate_condition_masking_setup(
+    config: ParticipantConfig,
+    bids_dir: Path,
+    layout: "BIDSLayout",
+    logger: logging.Logger,
+) -> None:
+    """Validate that condition masking can be performed if requested.
+    
+    If --conditions is used, ensures that:
+    1. The bids_dir contains the raw BIDS data (with events files), OR
+    2. An explicit events file path is provided via config
+    
+    Args:
+        config: Participant configuration
+        bids_dir: Path to BIDS directory (should be raw BIDS, not derivatives)
+        layout: BIDSLayout instance
+        logger: Logger instance
+    
+    Raises:
+        ConnectomixError: If conditions requested but events files cannot be found
+    """
+    # Check if condition masking is requested
+    has_conditions = (
+        config.condition_masking.enabled and 
+        config.condition_masking.conditions
+    )
+    
+    if not has_conditions:
+        return  # No condition masking needed
+    
+    logger.info("Validating condition masking setup...")
+    
+    # If explicit events file is provided, just validate it exists
+    if config.condition_masking.events_file and config.condition_masking.events_file != "auto":
+        events_path = Path(config.condition_masking.events_file)
+        if not events_path.exists():
+            raise ConnectomixError(
+                f"Specified events file not found: {events_path}\n"
+                f"Please check that the path is correct."
+            )
+        logger.info(f"Using explicit events file: {events_path}")
+        return
+    
+    # Try to find events files in the BIDS directory
+    bids_path = Path(bids_dir)
+    raw_events_files = sorted(bids_path.glob("**/task-*_events.tsv"))
+    
+    if raw_events_files:
+        logger.info(
+            f"Found {len(raw_events_files)} events file(s) in {bids_dir}. "
+            f"Will auto-detect matching events file for each functional scan."
+        )
+        return
+    
+    # No events files found - try to detect if they passed a derivatives directory
+    is_likely_derivative = (
+        (bids_path.name == "fmridenoiser" or "fmridenoiser" in str(bids_path)) or
+        (bids_path.name == "fmriprep" or "fmriprep" in str(bids_path)) or
+        ("derivatives" in str(bids_path))
+    )
+    
+    error_msg = (
+        f"Condition-based masking requested (--conditions {' '.join(config.condition_masking.conditions)}), "
+        f"but no events.tsv files found in {bids_dir}.\n\n"
+    )
+    
+    if is_likely_derivative:
+        error_msg += (
+            f"⚠️  It looks like you passed a DERIVATIVES directory instead of the RAW BIDS directory.\n\n"
+            f"To use condition-based masking, you must:\n"
+            f"  1. Use the RAW BIDS directory as the first argument (the one containing sub-*, task-*_events.tsv, etc.), OR\n"
+            f"  2. Use --events-file to explicitly specify the events.tsv file path\n\n"
+            f"Example with RAW BIDS:\n"
+            f"  connectomix /path/to/raw/bids /path/to/derivatives participant --conditions language\n\n"
+            f"Example with explicit events file:\n"
+            f"  connectomix {bids_dir} /path/to/derivatives participant \\\n"
+            f"      --conditions language --events-file /path/to/sub-021_task-language_events.tsv\n\n"
+        )
+    else:
+        error_msg += (
+            f"To use condition-based masking, you must:\n"
+            f"  1. Provide the RAW BIDS directory as the first argument (containing *_events.tsv files), OR\n"
+            f"  2. Use --events-file to explicitly specify the events file path\n\n"
+            f"(Note: The current directory does not appear to contain BIDS events files.)\n\n"
+            f"Your current bids_dir: {bids_dir}\n"
+            f"Searched pattern: {bids_dir}/**/task-*_events.tsv\n\n"
+        )
+    
+    error_msg += (
+        f"For more information on BIDS structure, see:\n"
+        f"  https://bids-specification.readthedocs.io/en/stable/99-appendices/03-bnf.html"
+    )
+    
+    raise ConnectomixError(error_msg)

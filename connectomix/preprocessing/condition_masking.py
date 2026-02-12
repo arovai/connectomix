@@ -76,14 +76,21 @@ class ConditionMasker:
     def apply_condition_selection(
         self,
         events_df: pd.DataFrame,
+        conditions: Optional[List[str]] = None,
     ) -> Dict[str, np.ndarray]:
         """Create masks for condition-based selection.
         
         For each condition in the events file, creates a boolean mask
         indicating which volumes belong to that condition.
         
+        Volumes are assigned to conditions based on:
+        - Volume center time (volume_index * TR + TR/2) falls within [onset, onset + duration)
+        
         Args:
             events_df: Events DataFrame with 'onset', 'duration', 'trial_type'.
+                      All times are in SECONDS.
+            conditions: List of specific conditions to process (or None to use config.conditions).
+                       Special keyword 'baseline' creates complementary mask.
             
         Returns:
             Dictionary mapping condition names to boolean masks.
@@ -97,7 +104,7 @@ class ConditionMasker:
                     f"Available columns: {list(events_df.columns)}"
                 )
         
-        # Determine condition column
+        # Determine condition column (must have trial_type or equivalent)
         condition_col = None
         for possible in ['trial_type', 'condition', 'event_type']:
             if possible in events_df.columns:
@@ -111,53 +118,54 @@ class ConditionMasker:
                 f"Available columns: {list(events_df.columns)}"
             )
         
-        # Get all unique conditions
+        # Get all unique conditions from events file
         all_conditions = events_df[condition_col].unique().tolist()
-        self._logger.info(f"Found conditions in events file: {all_conditions}")
+        self._logger.info(f"Found trial types in events file: {all_conditions}")
+        
+        # Determine which conditions to process
+        # Priority: explicit conditions parameter > config.conditions
+        conditions_to_use = conditions if conditions is not None else getattr(self.config, 'conditions', None)
         
         # Check if user requested "baseline" (special keyword for inter-trial intervals)
         baseline_requested = False
-        if self.config.conditions:
+        if conditions_to_use:
             # Check for special "baseline" keyword (case-insensitive)
             baseline_keywords = {'baseline', 'rest', 'iti', 'inter-trial'}
-            requested_lower = {c.lower() for c in self.config.conditions}
+            requested_lower = {c.lower() for c in conditions_to_use}
             baseline_requested = bool(requested_lower & baseline_keywords)
             
             # Filter out baseline keywords from conditions to process
-            conditions_to_process = [c for c in self.config.conditions if c.lower() not in baseline_keywords]
+            conditions_to_process = [c for c in conditions_to_use if c.lower() not in baseline_keywords]
             
             # Validate remaining conditions exist in events file
             for cond in conditions_to_process:
                 if cond not in all_conditions:
                     raise PreprocessingError(
-                        f"Condition '{cond}' not found in events file. "
-                        f"Available conditions: {all_conditions}\n"
+                        f"Trial type '{cond}' not found in events file. "
+                        f"Available trial types: {all_conditions}\n"
                         f"Tip: Use 'baseline' to select inter-trial intervals."
                     )
         else:
-            # Process all conditions
+            # No conditions specified - process all trial types
             conditions_to_process = all_conditions
         
-        # Also check include_baseline flag
-        baseline_requested = baseline_requested or self.config.include_baseline
+        # Compute volume center times in seconds
+        # Volume i covers time [i*TR, (i+1)*TR)
+        # Center of volume i is at time i*TR + TR/2
+        volume_centers = np.arange(self.n_volumes) * self.tr + self.tr / 2
         
-        # Create volume times (center of each volume)
-        volume_times = np.arange(self.n_volumes) * self.tr + self.tr / 2
+        self._logger.debug(f"Data: {self.n_volumes} volumes, TR={self.tr}s, "
+                          f"total duration={self.n_volumes * self.tr:.1f}s")
         
         # First, compute mask for ALL events (needed for baseline calculation)
         all_events_mask = np.zeros(self.n_volumes, dtype=bool)
         for _, event in events_df.iterrows():
-            onset = event['onset']
-            duration = event['duration']
+            onset = float(event['onset'])  # Seconds
+            duration = float(event['duration'])  # Seconds
+            event_end = onset + duration
             
-            # Apply transition buffer for baseline calculation too
-            buffered_onset = onset + self.config.transition_buffer
-            buffered_end = onset + duration - self.config.transition_buffer
-            
-            if buffered_end <= buffered_onset:
-                continue
-            
-            in_event = (volume_times >= buffered_onset) & (volume_times < buffered_end)
+            # Volume i belongs to event if its center falls in [onset, event_end)
+            in_event = (volume_centers >= onset) & (volume_centers < event_end)
             all_events_mask |= in_event
         
         # Create mask for each requested condition
@@ -168,36 +176,43 @@ class ConditionMasker:
             # Start with all False
             cond_mask = np.zeros(self.n_volumes, dtype=bool)
             
-            # Get events for this condition
+            # Get events for this trial type
             cond_events = events_df[events_df[condition_col] == condition]
+            n_events = len(cond_events)
             
-            for _, event in cond_events.iterrows():
-                onset = event['onset']
-                duration = event['duration']
+            self._logger.debug(f"Processing condition '{condition}': {n_events} events")
+            
+            for event_idx, (_, event) in enumerate(cond_events.iterrows()):
+                onset = float(event['onset'])  # Seconds
+                duration = float(event['duration'])  # Seconds
+                event_end = onset + duration
                 
-                # Apply transition buffer
-                buffered_onset = onset + self.config.transition_buffer
-                buffered_end = onset + duration - self.config.transition_buffer
+                # Find volumes whose CENTER falls within [onset, event_end)
+                in_event = (volume_centers >= onset) & (volume_centers < event_end)
+                n_vols_this_event = np.sum(in_event)
                 
-                if buffered_end <= buffered_onset:
-                    # Buffer too large, skip this event
-                    continue
+                if n_vols_this_event > 0:
+                    self._logger.debug(
+                        f"  Event {event_idx + 1}: onset={onset:.2f}s, "
+                        f"duration={duration:.2f}s → {n_vols_this_event} volume(s)"
+                    )
                 
-                # Find volumes within this event
-                in_event = (volume_times >= buffered_onset) & (volume_times < buffered_end)
                 cond_mask |= in_event
             
-            # Store raw condition timing
+            # Store masks
             self.raw_condition_masks[condition] = cond_mask.copy()
-            
-            # Store as effective mask (no global censoring to apply — that's upstream)
             self.condition_masks[condition] = cond_mask
-            n_volumes_cond = np.sum(cond_mask)
             
-            self._logger.info(
-                f"Condition '{condition}': {n_volumes_cond} volumes "
-                f"({100 * n_volumes_cond / self.n_volumes:.1f}%)"
-            )
+            n_volumes_cond = np.sum(cond_mask)
+            if n_volumes_cond > 0:
+                self._logger.info(
+                    f"Trial type '{condition}': {n_volumes_cond} volumes "
+                    f"({100 * n_volumes_cond / self.n_volumes:.1f}%)"
+                )
+            else:
+                self._logger.warning(
+                    f"Trial type '{condition}': NO volumes selected (check onset/duration)"
+                )
         
         # Add baseline if requested
         if baseline_requested:
@@ -207,7 +222,7 @@ class ConditionMasker:
             
             n_baseline = np.sum(raw_baseline_mask)
             self._logger.info(
-                f"Condition 'baseline' (inter-trial intervals): {n_baseline} volumes "
+                f"Baseline (inter-trial intervals): {n_baseline} volumes "
                 f"({100 * n_baseline / self.n_volumes:.1f}%)"
             )
         
