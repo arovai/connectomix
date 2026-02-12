@@ -49,13 +49,13 @@ def create_parser() -> argparse.ArgumentParser:
     description = textwrap.dedent(f"""
     {Colors.BOLD}{Colors.GREEN}╔══════════════════════════════════════════════════════════════════════════════╗
     ║                              CONNECTOMIX v{__version__}                              ║
-    ║         Functional Connectivity Analysis from fMRIPrep Outputs              ║
+    ║      Functional Connectivity Analysis from fmridenoiser Outputs           ║
     ╚══════════════════════════════════════════════════════════════════════════════╝{Colors.END}
     
     {Colors.BOLD}Description:{Colors.END}
-      Connectomix performs functional connectivity analysis on fMRI data that has
-      been preprocessed with fMRIPrep. It supports multiple connectivity methods
-      at both participant and group levels.
+      Connectomix performs functional connectivity analysis on pre-denoised fMRI data.
+      It supports multiple connectivity methods at the participant level.
+      Input data must be pre-denoised (e.g., from fmridenoiser or similar denoising pipeline).
     
     {Colors.BOLD}Connectivity Methods:{Colors.END}
       • {Colors.CYAN}seed-to-voxel{Colors.END}  - Correlation between seed regions and all brain voxels
@@ -63,13 +63,8 @@ def create_parser() -> argparse.ArgumentParser:
       • {Colors.CYAN}seed-to-seed{Colors.END}   - Correlation matrix between user-defined seeds
       • {Colors.CYAN}roi-to-roi{Colors.END}     - Correlation matrix between atlas regions
     
-    {Colors.BOLD}Analysis Levels:{Colors.END}
-      • {Colors.CYAN}participant{Colors.END}    - Process individual subjects (first-level analysis)
-      • {Colors.CYAN}group{Colors.END}          - Statistical analysis across subjects (second-level GLM)
-    
-    {Colors.BOLD}Workflow:{Colors.END}
-      1. Run participant-level analysis for each subject
-      2. Run group-level analysis to perform statistical inference
+    {Colors.BOLD}Note:{Colors.END}
+      Group-level analysis is under development and not yet available for use.
     """)
     
     # Detailed epilog with examples
@@ -78,37 +73,26 @@ def create_parser() -> argparse.ArgumentParser:
     {Colors.BOLD}EXAMPLES{Colors.END}
     {Colors.GREEN}═══════════════════════════════════════════════════════════════════════════════{Colors.END}
     
-    {Colors.BOLD}Basic Usage:{Colors.END}
+    {Colors.BOLD}Basic Usage (Recommended):{Colors.END}
     
-      {Colors.YELLOW}# Run participant-level analysis with default settings{Colors.END}
-      connectomix /data/bids /data/derivatives/connectomix participant
+      {Colors.YELLOW}# Specify denoised derivatives location (recommended approach){Colors.END}
+      connectomix /data/bids /data/output participant \
+          --derivatives fmridenoiser=/path/to/fmridenoiser
     
-      {Colors.YELLOW}# Run group-level analysis{Colors.END}
-      connectomix /data/bids /data/derivatives/connectomix group
+      {Colors.YELLOW}# Alternative: Use denoised output directory directly{Colors.END}
+      connectomix /data/denoised_output /data/output participant
     
     {Colors.BOLD}With Configuration File:{Colors.END}
     
-      {Colors.YELLOW}# Use a YAML configuration file{Colors.END}
+      {Colors.YELLOW}# Use a YAML or JSON configuration file{Colors.END}
       connectomix /data/bids /data/output participant --config analysis_config.yaml
-    
-      {Colors.YELLOW}# Use a JSON configuration file{Colors.END}
-      connectomix /data/bids /data/output group --config group_config.json
-    
-    {Colors.BOLD}Specifying fMRIPrep Location:{Colors.END}
-    
-      {Colors.YELLOW}# When fMRIPrep output is not in default location{Colors.END}
-      connectomix /data/bids /data/output participant \\
-          --derivatives fmriprep=/data/derivatives/fmriprep
-    
-      {Colors.YELLOW}# Multiple derivatives sources{Colors.END}
-      connectomix /data/bids /data/output participant \\
-          --derivatives fmriprep=/path/to/fmriprep \\
-          --derivatives freesurfer=/path/to/freesurfer
     
     {Colors.BOLD}Filtering Subjects/Sessions:{Colors.END}
     
-      {Colors.YELLOW}# Process only subject 01{Colors.END}
-      connectomix /data/bids /data/output participant --participant-label 01
+      {Colors.YELLOW}# Process only subject 01 (with --derivatives approach){Colors.END}
+      connectomix /data/bids /data/output participant \
+          --derivatives fmridenoiser=/path/to/fmridenoiser \
+          --participant-label 01
     
       {Colors.YELLOW}# Process specific task, session, and run{Colors.END}
       connectomix /data/bids /data/output participant \\
@@ -117,35 +101,10 @@ def create_parser() -> argparse.ArgumentParser:
           --session 1 \\
           --run 1
     
-      {Colors.YELLOW}# Process only data in specific space{Colors.END}
-      connectomix /data/bids /data/output participant --space MNI152NLin2009cAsym
-    
-    {Colors.BOLD}Using Denoising Strategies:{Colors.END}
-    
-      {Colors.YELLOW}# Use minimal denoising (motion parameters only){Colors.END}
-      connectomix /data/bids /data/output participant --denoising minimal
-    
-      {Colors.YELLOW}# Use CSF+WM with 6 motion parameters{Colors.END}
-      connectomix /data/bids /data/output participant --denoising csfwm_6p
-    
-      {Colors.YELLOW}# Include global signal regression{Colors.END}
-      connectomix /data/bids /data/output participant --denoising gs_csfwm_12p
-    
-    {Colors.BOLD}Selecting Atlas and Method:{Colors.END}
-    
-      {Colors.YELLOW}# Use AAL atlas for ROI-to-ROI connectivity{Colors.END}
-      connectomix /data/bids /data/output participant --atlas aal --method roiToRoi
-    
-      {Colors.YELLOW}# Use Schaefer 200-parcel atlas{Colors.END}
-      connectomix /data/bids /data/output participant --atlas schaefer2018n200
-    
-      {Colors.YELLOW}# Seed-to-voxel connectivity (requires seeds_file in config){Colors.END}
-      connectomix /data/bids /data/output participant --method seedToVoxel -c config.yaml
-    
-    {Colors.BOLD}Verbose Output:{Colors.END}
-    
-      {Colors.YELLOW}# Enable debug-level logging{Colors.END}
-      connectomix /data/bids /data/output participant --verbose
+      {Colors.YELLOW}# Apply condition-based temporal masking{Colors.END}
+      connectomix /data/bids /data/output participant \
+          --conditions face house \
+          --fd-threshold 0.5
     
     {Colors.BOLD}{Colors.GREEN}═══════════════════════════════════════════════════════════════════════════════{Colors.END}
     {Colors.BOLD}CONFIGURATION FILE{Colors.END}
@@ -159,42 +118,8 @@ def create_parser() -> argparse.ArgumentParser:
       method: seed-to-voxel
       seeds_file: /path/to/seeds.tsv
       space: MNI152NLin2009cAsym
-      high_pass: 0.008
-      low_pass: 0.1
-      denoising_strategy: csfwm_6p
-    
-    {Colors.BOLD}Example group config (YAML):{Colors.END}
-    
-      contrast: "patient - control"
-      covariates: [age, sex]
-      threshold_method: fdr
+      atlas: schaefer2018n200
       alpha: 0.05
-      n_permutations: 5000
-    
-    {Colors.BOLD}{Colors.GREEN}═══════════════════════════════════════════════════════════════════════════════{Colors.END}
-    {Colors.BOLD}DENOISING STRATEGIES{Colors.END}
-    {Colors.GREEN}═══════════════════════════════════════════════════════════════════════════════{Colors.END}
-    
-      {Colors.CYAN}minimal{Colors.END}        6 motion parameters only
-      {Colors.CYAN}csfwm_6p{Colors.END}       CSF + WM + 6 motion parameters
-      {Colors.CYAN}csfwm_12p{Colors.END}      CSF + WM + 12 motion params (6 + derivatives)
-      {Colors.CYAN}gs_csfwm_6p{Colors.END}    Global signal + CSF + WM + 6 motion params
-      {Colors.CYAN}gs_csfwm_12p{Colors.END}   Global signal + CSF + WM + 12 motion params
-      {Colors.CYAN}csfwm_24p{Colors.END}      CSF + WM + 24 motion params (6 + deriv + squares)
-      {Colors.CYAN}compcor_6p{Colors.END}     6 aCompCor components + 6 motion params
-      {Colors.CYAN}simpleGSR{Colors.END}      Global + CSF + WM + 24 motion (preserves time series)
-      {Colors.CYAN}scrubbing5{Colors.END}     CSF/WM derivatives + 24 motion + FD=0.5cm + scrub=5
-
-    {Colors.BOLD}Choosing between simpleGSR and scrubbing5 (Wang et al. 2024):{Colors.END}
-      • Use {Colors.CYAN}simpleGSR{Colors.END} for continuous time series (autoregressive, spectral analysis)
-      • Use {Colors.CYAN}scrubbing5{Colors.END} for high-motion data when denoising quality is priority
-      • Note: scrubbing5 is rigid (cannot combine with --fd-threshold or --scrub)
-    
-    {Colors.BOLD}WILDCARD SUPPORT:{Colors.END}
-      Confound names support wildcards: {Colors.CYAN}*{Colors.END} matches any chars, {Colors.CYAN}?{Colors.END} matches one char
-      
-      {Colors.YELLOW}# Example: Select all aCompCor components{Colors.END}
-      confounds: ["a_comp_cor_*", "trans_*", "rot_*"]
     
     {Colors.BOLD}{Colors.GREEN}═══════════════════════════════════════════════════════════════════════════════{Colors.END}
     {Colors.BOLD}OUTPUT STRUCTURE{Colors.END}
@@ -208,9 +133,8 @@ def create_parser() -> argparse.ArgumentParser:
       │   └── func/
       │       ├── sub-01_task-rest_space-MNI_desc-connectivity_bold.nii.gz
       │       └── sub-01_task-rest_space-MNI_desc-connectivity_bold.json
-      └── group/
-          ├── group_task-rest_contrast-patientVsControl_stat-t_statmap.nii.gz
-          └── group_task-rest_contrast-patientVsControl_clusters.tsv
+      └── sub-02/
+          └── ...
     
     {Colors.BOLD}{Colors.GREEN}═══════════════════════════════════════════════════════════════════════════════{Colors.END}
     {Colors.BOLD}MORE INFORMATION{Colors.END}
@@ -254,10 +178,10 @@ def create_parser() -> argparse.ArgumentParser:
     
     required.add_argument(
         "analysis_level",
-        choices=["participant", "group"],
-        metavar="{participant,group}",
-        help="Analysis level to perform. 'participant' processes individual "
-             "subjects. 'group' performs second-level statistical analysis.",
+        choices=["participant"],
+        metavar="{participant}",
+        help="Analysis level to perform. Currently only 'participant'-level "
+             "processing is available (first-level analysis).",
     )
     
     # =========================================================================
@@ -309,10 +233,9 @@ def create_parser() -> argparse.ArgumentParser:
         action="append",
         metavar="NAME=PATH",
         dest="derivatives",
-        help="Specify location of BIDS derivatives. Format: name=path "
-             "(e.g., fmriprep=/data/derivatives/fmriprep). Can be specified "
-             "multiple times for different derivatives. If not specified, "
-             "Connectomix searches for 'fmriprep' in BIDS_DIR/derivatives/.",
+        help="Specify location of denoised derivatives. Format: name=path "
+             "(e.g., fmridenoiser=/data/fmridenoiser). "
+             "Use this flag if denoised outputs are in non-standard locations.",
     )
     
     # =========================================================================
@@ -359,7 +282,7 @@ def create_parser() -> argparse.ArgumentParser:
         metavar="SPACE",
         help="Process only data in this template space "
              "(e.g., 'MNI152NLin2009cAsym', 'MNI152NLin6Asym'). "
-             "Must match fMRIPrep output space.",
+             "Must match the space of denoised input data.",
     )
     
     filters.add_argument(
@@ -374,9 +297,8 @@ def create_parser() -> argparse.ArgumentParser:
     # OPTIONAL ARGUMENTS - Temporal Censoring
     # =========================================================================
     censoring = parser.add_argument_group(
-        f'{Colors.BOLD}Temporal Censoring Options{Colors.END}',
-        "Remove specific timepoints (volumes) before connectivity analysis. "
-        "Disabled by default. Enable with --conditions or --fd-threshold."
+        f'{Colors.BOLD}Condition-Based Masking (Task fMRI){Colors.END}',
+        "Select specific timepoints based on experimental conditions. Available for task fMRI."
     )
     
     censoring.add_argument(
@@ -416,75 +338,14 @@ def create_parser() -> argparse.ArgumentParser:
              "Accounts for hemodynamic response lag.",
     )
     
-    censoring.add_argument(
-        "--fd-threshold",
-        metavar="CM",
-        type=float,
-        dest="fd_threshold",
-        help=("Enable motion censoring. Remove volumes with framewise displacement "
-              "above this threshold. Note: fMRIPrep reports FD values in centimeters (cm), "
-              "so this argument expects a value in cm. Typical FD thresholds reported in the "
-              "literature are 0.2–0.5 cm. Uses the 'framewise_displacement' "
-              "column from fMRIPrep confounds."),
-    )
-    
-    censoring.add_argument(
-        "--fd-extend",
-        metavar="N",
-        type=int,
-        dest="fd_extend",
-        default=0,
-        help="Number of volumes to also censor before AND after high-motion volumes "
-             "(default: 0). Example: --fd-extend 1 censors ±1 volume around high-FD.",
-    )
-    
-    censoring.add_argument(
-        "--scrub",
-        metavar="N",
-        type=int,
-        dest="scrub",
-        default=0,
-        help="Minimum contiguous segment length to keep after motion censoring. "
-             "If N > 0, continuous segments of kept volumes shorter than N are also "
-             "censored. This ensures only sufficiently long data segments remain for "
-             "reliable connectivity estimation. Default: 0 (disabled). "
-             "Requires --fd-threshold to be set.",
-    )
-    
-    censoring.add_argument(
-        "--drop-initial",
-        metavar="N",
-        type=int,
-        dest="drop_initial",
-        default=0,
-        help="Number of initial volumes to drop (dummy scans). Default: 0.",
-    )
-    
-    # =========================================================================
-    # OPTIONAL ARGUMENTS - Preprocessing
-    # =========================================================================
-    preproc = parser.add_argument_group(
-        f'{Colors.BOLD}Preprocessing Options{Colors.END}'
-    )
-    
-    preproc.add_argument(
-        "--denoising",
-        metavar="STRATEGY",
-        choices=["minimal", "csfwm_6p", "csfwm_12p", "gs_csfwm_6p", "gs_csfwm_12p", "csfwm_24p", "compcor_6p", "simpleGSR", "scrubbing5"],
-        help="Use a predefined denoising strategy. Choices: "
-             "%(choices)s. "
-             "Note: 'scrubbing5' includes FD censoring (0.5 cm) and segment filtering "
-             "(min 5 volumes) and cannot be combined with --fd-threshold or --scrub. "
-             "See DENOISING STRATEGIES section below for details. "
-             "Can also be specified in config file.",
-    )
+
     
     # =========================================================================
     # OPTIONAL ARGUMENTS - Analysis Method & Atlas
     # =========================================================================
     analysis_opts = parser.add_argument_group(
         f'{Colors.BOLD}Analysis Options{Colors.END}',
-        "Connectivity method and atlas selection (applies to both participant and group level)."
+        "Connectivity method and atlas selection."
     )
     
     analysis_opts.add_argument(
@@ -501,23 +362,6 @@ def create_parser() -> argparse.ArgumentParser:
         choices=["seedToVoxel", "roiToVoxel", "seedToSeed", "roiToRoi"],
         help="Connectivity method. "
              "Choices: %(choices)s. Default: roiToRoi.",
-    )
-    
-    # =========================================================================
-    # OPTIONAL ARGUMENTS - Group Analysis
-    # =========================================================================
-    group_opts = parser.add_argument_group(
-        f'{Colors.BOLD}Group Analysis Options{Colors.END}',
-        "Options specific to group-level tangent space connectivity analysis."
-    )
-    
-    group_opts.add_argument(
-        "--participant-derivatives",
-        metavar="PATH",
-        dest="participant_derivatives",
-        type=Path,
-        help="Path to participant-level connectomix outputs. "
-             "Required for group analysis if not in default location.",
     )
     
     return parser

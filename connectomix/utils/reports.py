@@ -767,7 +767,7 @@ class ParticipantReportGenerator:
             subject_id: Subject ID or full BIDS label
             config: ParticipantConfig with analysis parameters
             output_dir: Output directory for reports
-            confounds_df: Confounds DataFrame from fMRIPrep
+            confounds_df: Confounds DataFrame from preprocessing (fmridenoiser or fMRIPrep)
             selected_confounds: List of confound columns used
             connectivity_matrix: Connectivity matrix (for ROI methods)
             roi_names: ROI labels for matrix methods
@@ -987,7 +987,7 @@ class ParticipantReportGenerator:
         """Add denoising information.
         
         Args:
-            confounds_df: Full confounds DataFrame from fMRIPrep
+            confounds_df: Full confounds DataFrame from preprocessing (fmridenoiser or fMRIPrep)
             confounds_used: List of confound columns used in denoising
         """
         self.confounds_df = confounds_df
@@ -1100,14 +1100,6 @@ class ParticipantReportGenerator:
                     <div class="metric-value">{atlas_overview}</div>
                     <div class="metric-label">Atlas</div>
                 </div>
-                <div class="metric-card">
-                    <div class="metric-value">{self.config.high_pass:.3f}</div>
-                    <div class="metric-label">High-pass (Hz)</div>
-                </div>
-                <div class="metric-card">
-                    <div class="metric-value">{self.config.low_pass:.3f}</div>
-                    <div class="metric-label">Low-pass (Hz)</div>
-                </div>
             </div>
             
             <h3>Method Description</h3>
@@ -1115,8 +1107,8 @@ class ParticipantReportGenerator:
             
             <div class="alert alert-info">
                 <span class="alert-icon">ℹ️</span>
-                <div>This analysis computes functional connectivity from preprocessed 
-                fMRI data using confound regression and temporal filtering.</div>
+                <div>This analysis computes functional connectivity from denoised 
+                fMRI data produced by fmridenoiser.</div>
             </div>
         </div>
         '''
@@ -1126,13 +1118,10 @@ class ParticipantReportGenerator:
         """Build analysis parameters section."""
         self.toc_items.append(("parameters", "Analysis Parameters"))
         
-        # Preprocessing parameters
+        # Preprocessing parameters (from upstream denoising by fmridenoiser)
         preproc_params = [
-            ("High-pass filter", f"{self.config.high_pass} Hz"),
-            ("Low-pass filter", f"{self.config.low_pass} Hz"),
-            ("Confounds", ", ".join(self.config.confounds[:5]) + ("..." if len(self.config.confounds) > 5 else "")),
-            ("Standardize", "True"),
-            ("Detrend", "True"),
+            ("Preprocessed by", "fmridenoiser"),
+            ("Analysis type", "consumes denoised data"),
         ]
         
         preproc_rows = ""
@@ -1260,155 +1249,34 @@ class ParticipantReportGenerator:
         return html
     
     def _build_confounds_section(self) -> str:
-        """Build confounds/denoising section."""
-        self.toc_items.append(("denoising", "Denoising"))
-        
-        confounds_list = "</li><li>".join(self.config.confounds)
-        n_confounds = len(self.config.confounds)
-        
-        # Check if a predefined denoising strategy was used
-        strategy_name = getattr(self.config, 'denoising_strategy', None)
-        
-        # Build strategy info card if applicable
-        strategy_card = ""
-        if strategy_name:
-            strategy_card = f'''
-                <div class="metric-card">
-                    <div class="metric-value" style="font-size: 1.2rem;">{strategy_name}</div>
-                    <div class="metric-label">Predefined Strategy</div>
-                </div>
-            '''
+        """Build preprocessing note section (denoising done upstream)."""
+        self.toc_items.append(("preprocessing", "Preprocessing"))
         
         html = f'''
-        <div class="section" id="denoising">
-            <h2>🧹 Denoising Strategy</h2>
+        <div class="section" id="preprocessing">
+            <h2>🔧 Preprocessing</h2>
             
-            <div class="metrics-grid">
-                {strategy_card}
-                <div class="metric-card">
-                    <div class="metric-value">{n_confounds}</div>
-                    <div class="metric-label">Confound Regressors</div>
+            <div class="alert alert-info">
+                <span class="alert-icon">ℹ️</span>
+                <div>
+                    <strong>Note:</strong> This analysis uses denoised fMRI data preprocessed
+                    by <strong>fmridenoiser</strong>. Confound regression, temporal filtering,
+                    and motion censoring were applied during the upstream denoising step.
                 </div>
             </div>
             
-            <h3>Confounds Used</h3>
-            <ul>
-                <li>{confounds_list}</li>
-            </ul>
+            <h3>Preprocessing Pipeline</h3>
+            <ol>
+                <li>fMRI preprocessing by fMRIPrep</li>
+                <li>Confound regression and denoising by fmridenoiser</li>
+                <li>Connectivity analysis by Connectomix</li>
+            </ol>
             
-            <p>These confounds were regressed from the BOLD signal before computing 
-            connectivity. The signal was also bandpass filtered between 
-            {self.config.high_pass} and {self.config.low_pass} Hz.</p>
+            <p>For detailed information about confounds and preprocessing parameters used,
+            please refer to the fmridenoiser output in the derivatives directory.</p>
+        </div>
         '''
         
-        # Add denoising plot if we have confounds data
-        if self.confounds_df is not None and len(self.confounds_used) > 0:
-            fig = self._create_confounds_plot()
-            if fig is not None:
-                fig_id = self._get_unique_figure_id()
-                img_data = self._figure_to_base64(fig)
-                
-                # Save figure to disk
-                self._save_figure_to_disk(fig, 'confounds_timeseries.png')
-                
-                plt.close(fig)
-                
-                html += f'''
-                <h3>Confound Time Series</h3>
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{fig_id}', 'confounds_timeseries.png')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: Time series of confound regressors used for denoising. 
-                        Values are z-scored for visualization.
-                    </div>
-                </div>
-                '''
-            
-            # Add confounds correlation matrix
-            corr_fig, corr_df = self._create_confounds_correlation_plot()
-            if corr_fig is not None:
-                corr_fig_id = self._get_unique_figure_id()
-                corr_img_data = self._figure_to_base64(corr_fig)
-                
-                # Build BIDS-compliant filename
-                bids_base = self._build_bids_base_filename()
-                corr_fig_filename = f"{bids_base}_confounds-correlation.png"
-                corr_npy_filename = f"{bids_base}_confounds-correlation.npy"
-                
-                # Save figure to figures dir
-                self._save_figure_to_disk(corr_fig, corr_fig_filename)
-                
-                # Save correlation matrix as .npy to connectivity_data dir
-                if corr_df is not None:
-                    self._save_matrix_to_disk(
-                        corr_df.values,
-                        corr_npy_filename,
-                        labels=list(corr_df.columns),
-                        description="Pearson correlation matrix between confound regressors"
-                    )
-                
-                plt.close(corr_fig)
-                
-                html += f'''
-                <h3>Confound Inter-Correlations</h3>
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{corr_fig_id}" src="data:image/png;base64,{corr_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{corr_fig_id}', '{corr_fig_filename}')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: Pearson correlation matrix between confound regressors. 
-                        High correlations between confounds may indicate redundancy in the denoising strategy.
-                    </div>
-                </div>
-                '''
-        
-        # Add denoising histogram if available
-        if self.denoising_histogram_data is not None:
-            hist_fig = self._create_denoising_histogram_plot()
-            if hist_fig is not None:
-                hist_fig_id = self._get_unique_figure_id()
-                hist_img_data = self._figure_to_base64(hist_fig, dpi=150)
-                
-                bids_base = self._build_bids_base_filename()
-                hist_filename = f"{bids_base}_denoising-histogram.png"
-                self._save_figure_to_disk(hist_fig, hist_filename, dpi=150)
-                plt.close(hist_fig)
-                
-                # Get stats for caption
-                orig_stats = self.denoising_histogram_data['original_stats']
-                den_stats = self.denoising_histogram_data['denoised_stats']
-                
-                html += f'''
-                <h3>Denoising Effect on Signal Distribution</h3>
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{hist_fig_id}" src="data:image/png;base64,{hist_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{hist_fig_id}', '{hist_filename}')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: Histogram of all voxel intensity values across all timepoints, before (blue) 
-                        and after (coral) denoising. <strong>Note:</strong> For visualization purposes, 
-                        the before-denoising data has been z-scored to allow comparison on the same scale 
-                        (raw BOLD values are typically ~1000). After denoising, confound regression, 
-                        bandpass filtering, and standardization are applied, which changes the distribution shape.
-                        <br><br>
-                        <strong>Statistics (z-scored):</strong> Before: μ={orig_stats['mean']:.2f}, σ={orig_stats['std']:.2f}. 
-                        After: μ={den_stats['mean']:.2f}, σ={den_stats['std']:.2f}.
-                    </div>
-                </div>
-                '''
-        
-        html += "</div>"
         return html
     
     def _create_confounds_plot(self) -> Optional[plt.Figure]:
@@ -2091,30 +1959,6 @@ class ParticipantReportGenerator:
                 </div>
                 '''
                 
-                # Create and add connectome glass brain plot
-                connectome_fig = self._create_connectome_plot(matrix, connectivity_type)
-                if connectome_fig is not None:
-                    connectome_fig_id = self._get_unique_figure_id()
-                    connectome_img_data = self._figure_to_base64(connectome_fig, dpi=150)
-                    connectome_filename = f"connectome_{name}.png"
-                    self._save_figure_to_disk(connectome_fig, connectome_filename, dpi=150)
-                    plt.close(connectome_fig)
-                    
-                    html += f'''
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{connectome_fig_id}" src="data:image/png;base64,{connectome_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{connectome_fig_id}', '{connectome_filename}')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: {display_name} connectome visualization (glass brain, axial view).
-                        Shows the strongest 20% of connections between brain regions.
-                    </div>
-                </div>
-                '''
-                
                 # Create and add histogram
                 hist_fig = self._create_connectivity_histogram(matrix, name, connectivity_type)
                 if hist_fig is not None:
@@ -2275,105 +2119,7 @@ class ParticipantReportGenerator:
             logger.warning(f"Could not create connectivity histogram: {e}")
             return None
     
-    def _create_connectome_plot(
-        self,
-        matrix: np.ndarray,
-        connectivity_type: Optional[str] = None
-    ) -> Optional[plt.Figure]:
-        """Create connectome glass brain plot using nilearn.
-        
-        Args:
-            matrix: Connectivity matrix (N x N).
-            connectivity_type: Type of connectivity measure.
-            
-        Returns:
-            Matplotlib figure with glass brain plot, or None if failed.
-        """
-        try:
-            from nilearn import plotting
-            from nilearn.plotting import find_parcellation_cut_coords
-            
-            # Get atlas coordinates - need to load the atlas first
-            if not hasattr(self.config, 'atlas') or not self.config.atlas:
-                logger.warning("No atlas specified, cannot create connectome plot")
-                return None
-            
-            atlas_name = self.config.atlas
-            
-            # Load atlas based on naming convention (same logic as participant.py)
-            try:
-                if atlas_name.startswith("schaefer2018"):
-                    from nilearn.datasets import fetch_atlas_schaefer_2018
-                    if "n" in atlas_name:
-                        n_rois = int(atlas_name.split("n")[1])
-                    else:
-                        n_rois = 100
-                    atlas = fetch_atlas_schaefer_2018(n_rois=n_rois, resolution_mm=2)
-                    atlas_img = atlas['maps']
-                elif atlas_name == "aal":
-                    from nilearn.datasets import fetch_atlas_aal
-                    atlas = fetch_atlas_aal()
-                    atlas_img = atlas['maps']
-                elif atlas_name == "harvardoxford":
-                    from nilearn.datasets import fetch_atlas_harvard_oxford
-                    atlas = fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm')
-                    atlas_img = atlas['maps']
-                else:
-                    logger.warning(f"Unknown atlas for connectome plot: {atlas_name}")
-                    return None
-                
-                # Get coordinates from atlas
-                coords = find_parcellation_cut_coords(atlas_img)
-                
-            except Exception as e:
-                logger.warning(f"Could not load atlas for connectome plot: {e}")
-                return None
-            
-            # Ensure coords and matrix dimensions match
-            if len(coords) != matrix.shape[0]:
-                logger.warning(
-                    f"Coordinate count ({len(coords)}) does not match matrix size ({matrix.shape[0]})"
-                )
-                return None
-            
-            # Build labels
-            type_labels = {
-                'correlation': 'Pearson Correlation',
-                'covariance': 'Covariance',
-                'partial correlation': 'Partial Correlation',
-                'precision': 'Precision'
-            }
-            measure_label = type_labels.get(connectivity_type, 'Connectivity')
-            
-            # Create figure
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            # For connectome plot, we threshold edges to show only the strongest
-            # Use 80th percentile to show top 20% of connections
-            plotting.plot_connectome(
-                matrix,
-                coords,
-                node_color='steelblue',
-                node_size=30,
-                edge_threshold="80%",  # Show top 20% of edges
-                edge_vmin=np.percentile(matrix, 5),
-                edge_vmax=np.percentile(matrix, 95),
-                display_mode='z',  # Axial view
-                colorbar=True,
-                axes=ax,
-                title=f'{measure_label} Connectome (axial view, top 20% edges)'
-            )
-            
-            # Note: skip tight_layout as nilearn's axes are not compatible
-            return fig
-            
-        except ImportError as e:
-            logger.warning(f"Could not import required libraries for connectome plot: {e}")
-            return None
-        except Exception as e:
-            logger.warning(f"Could not create connectome plot: {e}")
-            return None
-    
+
     def _build_qa_section(self) -> str:
         """Build quality assurance section."""
         if not self.qa_metrics:

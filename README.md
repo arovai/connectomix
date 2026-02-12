@@ -1,7 +1,7 @@
 # Connectomix
 
 <p align="center">
-  <strong>Functional Connectivity Analysis from fMRIPrep Outputs</strong>
+  <strong>Functional Connectivity Analysis from fmridenoiser Outputs</strong>
 </p>
 
 <p align="center">
@@ -17,17 +17,18 @@
 
 ## Overview
 
-**Connectomix** is a BIDS-compliant tool for computing functional connectivity from fMRIPrep-preprocessed fMRI data. It supports multiple connectivity methods at both participant and group levels, with comprehensive HTML reports for quality assurance.
+**Connectomix** is a BIDS-compliant tool for computing functional connectivity from pre-denoised fMRI data. It works with denoised outputs from **fmridenoiser** (recommended) or other denoising pipelines that produce BIDS `desc-denoised_bold` files. Connectomix supports multiple connectivity methods at the participant level, with comprehensive HTML reports for quality assurance.
+
+**Note:** Group-level analysis is under development and should not be used yet.
 
 ### Key Features
 
 - 🧠 **Four connectivity methods**: seed-to-voxel, ROI-to-voxel, seed-to-seed, ROI-to-ROI
-- � **Four connectivity measures**: correlation, covariance, partial correlation, precision
-- 📊 **Two analysis levels**: participant-level and group-level statistical inference
-- ⏱️ **Temporal censoring**: condition-based analysis for task fMRI, motion scrubbing
-- 🔧 **Flexible preprocessing**: predefined denoising strategies or custom confound selection
+- 📊 **Four connectivity measures**: correlation, covariance, partial correlation, precision
+- 📈 **Participant-level analysis**: Process individual subjects (first-level analysis)
+- ⏱️ **Condition-based temporal masking**: select specific task conditions for analysis
 - 📋 **BIDS-compliant**: standardized input/output structure
-- 📄 **HTML reports**: connectivity matrices, connectome plots, denoising QA histograms
+- 📄 **HTML reports**: connectivity matrices, connectome plots, atlas visualizations
 
 ### Technology Stack
 
@@ -55,7 +56,7 @@ connectomix --version
 
 **Requirements:**
 - Python 3.8+
-- fMRIPrep-preprocessed data (BIDS derivatives)
+- Pre-denoised fMRI data (from fmridenoiser or similar denoising pipeline)
 
 ### Manual Atlas Dataset Download
 
@@ -272,106 +273,102 @@ docker run -v ~/.cache/nilearn_data:/root/.cache/nilearn_data -v /data:/data myi
 
 ## Quick Start
 
-### Basic Usage
+### Basic Usage (Recommended)
 
 ```bash
-# Participant-level analysis (simplest)
-connectomix /data/bids /data/output participant
+# PRIMARY: Specify denoised data location using --derivatives
+# (uses fmridenoiser outputs for denoised BOLD files)
+connectomix /data/bids /data/output participant \
+    --derivatives fmridenoiser=/path/to/fmridenoiser
 
-# With specific subject and task
-connectomix /data/bids /data/output participant -p 01 -t rest
+# ALTERNATIVE: Use denoised output directory directly
+connectomix /data/denoised_output /data/output participant
+```
 
-# With custom atlas and connectivity method
-connectomix /data/bids /data/output participant --atlas aal --method roiToRoi
+### Common Workflow Examples
 
-# With configuration file
-connectomix /data/bids /data/output participant -c config.yaml
+```bash
+# Process specific participant
+connectomix /data/bids /data/output participant \
+    --derivatives fmridenoiser=/path/to/fmridenoiser \
+    --participant-label 01
 
-# Group-level analysis
-connectomix /data/bids /data/output group -c group_config.yaml
+# Process task and custom atlas
+connectomix /data/bids /data/output participant \
+    --derivatives fmridenoiser=/path/to/fmridenoiser \
+    --task rest --atlas aal
 
-# Verbose output for debugging
-connectomix /data/bids /data/output participant -v
+# Using configuration file
+connectomix /data/bids /data/output participant \
+    --config analysis_config.yaml
 ```
 
 ### Input Data Requirements
 
-#### Minimal Input: fMRIPrep Derivatives Only
+#### Required: Denoised BOLD Files
 
-**Good news:** Connectomix does **not require access to raw BIDS data**. You only need fMRIPrep-preprocessed outputs:
+Connectomix requires **denoised fMRI data** to operate. It does NOT perform denoising itself. Denoised data must come from preprocessing pipelines like:
 
-```bash
-# This works! No rawdata needed
-connectomix /path/to/fmriprep /path/to/output participant
-```
+- **Recommended:** [fmridenoiser](https://github.com/arovai/fmridenoiser) - produces `desc-denoised_bold` files
+- **Also supported:** Pre-denoised outputs from similar pipelines
 
-The key insight is that:
-- ✅ All preprocessing information needed for connectivity analysis is in fMRIPrep outputs
-- ✅ Confounds, anatomical masks, and preprocessing details are all available
-- ✅ You can run Connectomix from the fMRIPrep directory without the original BIDS rawdata
-- ✅ **No need for `--derivatives fmriprep=/path`** - just use the fMRIPrep path directly as your first argument
+**Connectomix expects files with the BIDS `desc-denoised_bold` label.**
 
-#### When You DO Need Raw Data
-
-The only case where raw BIDS data is required is when using **condition-based temporal censoring** with `--conditions`:
+#### How to Use the Recommended Workflow
 
 ```bash
-# This requires raw task-events.tsv files
-connectomix /path/to/fmriprep /path/to/output participant \
-  --conditions "go,stop"
+# Step 1: Run fmridenoiser on your raw BIDS dataset
+fmridenoiser /path/to/bids /path/to/fmridenoiser_output participant
+
+# Step 2: Run Connectomix with denoised outputs
+connectomix /path/to/bids /path/to/output participant \
+    --derivatives fmridenoiser=/path/to/fmridenoiser_output
 ```
 
-When raw data is not available, you can:
-1. **Provide the task-events file directly** (recommended):
-   ```bash
-   connectomix /path/to/fmriprep /path/to/output participant \
-     --events-file /path/to/task-events.tsv \
-     --conditions "go,stop"
-   ```
+#### Expected BIDS Directory Structure
 
-2. **Skip condition-based censoring** and use motion-based censoring instead:
-   ```bash
-   connectomix /path/to/fmriprep /path/to/output participant \
-     --fd-threshold 0.5  # Motion censoring doesn't need raw data
-   ```
-
-#### BIDS Directory Structure
-
-For reference, here's a typical fMRIPrep output structure:
+When using `--derivatives fmridenoiser=/path/to/fmridenoiser`, Connectomix expects:
 
 ```
-fmriprep/
+fmridenoiser_output/
 ├── sub-01/
-│   ├── func/
-│   │   ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-preproc_bold.nii.gz
-│   │   ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-preproc_bold.json
-│   │   ├── sub-01_task-rest_desc-confounds_timeseries.tsv
-│   │   └── ...
-│   ├── anat/
-│   │   ├── sub-01_space-MNI152NLin2009cAsym_desc-preproc_T1w.nii.gz
-│   │   └── ...
-│   └── figures/
+│   └── func/
+│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.nii.gz
+│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.json
+│       └── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_confounds.tsv
 ├── sub-02/
-│   └── ...
+│   └── func/
+│       └── ...
 └── dataset_description.json
 ```
 
-Connectomix only needs the `func/` and `anat/` directories - the raw BIDS data is optional.
+#### Condition-Based Temporal Censoring with Raw Data
 
-### Specifying fMRIPrep Location
+If you need to apply condition-based masking (selecting specific task conditions), you must provide access to the task events file:
 
 ```bash
-# If fMRIPrep output is not in bids_dir/derivatives/fmriprep
+# Raw BIDS data is required for condition-based masking
 connectomix /data/bids /data/output participant \
-  --derivatives fmriprep=/path/to/fmriprep
+    --derivatives fmridenoiser=/path/to/fmridenoiser \
+    --conditions "go,stop" \
+    --include-baseline
 ```
 
-**Note:** In most cases, you can simply use the fMRIPrep directory as your first argument (see "Minimal Input" above).
+Alternatively, provide the events file directly:
+
+```bash
+# If raw BIDS is not available, provide events file explicitly
+connectomix /data/denoised_output /data/output participant \
+    --events-file /path/to/task-events.tsv \
+    --conditions "go,stop"
+```
+
 
 ### Common Command-Line Arguments
 
 | Argument | Short | Description | Example |
 |----------|-------|-------------|---------|
+| `--derivatives` | | Denoised derivatives location | `--derivatives fmridenoiser=/path/to/fmridenoiser` |
 | `--participant-label` | `-p` | Subject(s) to process | `-p 01` |
 | `--task` | `-t` | Task name to process | `-t restingstate` |
 | `--session` | `-s` | Session to process | `-s 1` |
@@ -384,6 +381,14 @@ connectomix /data/bids /data/output participant \
 | `--derivatives` | `-d` | Derivative locations | `-d fmriprep=/path` |
 | `--label` | | Custom output label | `--label myanalysis` |
 | `--verbose` | `-v` | Enable debug output | `-v` |
+
+---
+
+## ⚠️ Important Note
+
+**Group-level analysis is currently under development and should NOT be used yet.**
+
+Connectomix currently supports participant-level (first-level) connectivity analysis only. Group-level statistical inference is planned for a future release. Please use the participant-level analysis workflow for your analyses.
 
 ---
 
@@ -779,41 +784,6 @@ temporal_censoring:
     fd_threshold: 0.5
 ```
 
-### Group-Level Configuration
-
-```yaml
-# group_config.yaml
-
-# Participants
-subject: ["01", "02", "03", "04", "05"]
-task: "restingstate"
-space: "MNI152NLin2009cAsym"
-
-# Method (must match participant-level)
-method: "roiToRoi"
-smoothing: 8.0
-
-# Analysis
-analysis_name: "patients_vs_controls"
-
-# Design matrix (from participants.tsv)
-covariates: ["group"]
-add_intercept: true
-
-# Contrast
-contrast: "group"
-
-# Statistics
-uncorrected_alpha: 0.001
-fdr_alpha: 0.05
-fwe_alpha: 0.05
-thresholding_strategies: ["uncorrected", "fdr", "fwe"]
-
-# Computational
-n_permutations: 10000
-n_jobs: 4
-```
-
 ### Denoising Strategies
 
 Use predefined strategies with `--denoising` or define custom confounds.
@@ -918,14 +888,7 @@ output_dir/
 │   └── sub-01_task-rest_desc-schaefer_report.html
 ├── sub-02/
 │   └── ...
-└── group/
-    └── roiToRoi/
-        └── patients_vs_controls/
-            ├── designMatrix.tsv
-            ├── stat-t.nii.gz
-            ├── threshold-fdr_stat-t.nii.gz
-            ├── clusterTable.tsv
-            └── report.html
+```
 ```
 
 ### Connectivity Data Files
@@ -989,7 +952,7 @@ plot_connectome(connectivity, roi_coords,
 
 ### Vectorization for Machine Learning
 
-Connectivity matrices can be vectorized for group analysis or machine learning:
+Connectivity matrices can be vectorized for machine learning applications:
 
 ```python
 def matrix_to_vector(matrix):
@@ -1005,7 +968,7 @@ def vector_to_matrix(vector, n_regions):
     matrix = matrix + matrix.T
     return matrix
 
-# For group analysis: stack all subjects
+# Stack connectivity vectors from multiple subjects
 n_regions = 100
 n_subjects = 50
 connectivity_vectors = np.zeros((n_subjects, n_regions*(n_regions-1)//2))
@@ -1034,16 +997,13 @@ Each participant-level HTML report includes:
 ### Workflow 1: Basic Resting-State Analysis
 
 ```bash
-# 1. Run participant-level
+# 1. Run participant-level connectivity analysis
 connectomix /data/bids /data/output participant \
+  --derivatives fmridenoiser=/path/to/fmridenoiser \
   -c participant_config.yaml -v
 
-# 2. Check HTML reports
-ls /data/output/sub-*/
-
-# 3. Run group-level
-connectomix /data/bids /data/output group \
-  -c group_config.yaml -v
+# 2. Check HTML reports for quality assurance
+ls /data/output/sub-*/*.html
 ```
 
 ### Workflow 2: Task-Based Connectivity
@@ -1082,9 +1042,6 @@ Relax your censoring thresholds (e.g., increase `--fd-threshold`).
 ### "Geometric consistency check failed"
 Connectomix will automatically resample if subjects have different geometries.
 
-### Slow permutation testing
-Reduce `n_permutations` (e.g., 5000) or increase `n_jobs` for parallelization.
-
 ---
 
 ## Tips and Best Practices
@@ -1093,8 +1050,7 @@ Reduce `n_permutations` (e.g., 5000) or increase `n_jobs` for parallelization.
 2. **Use verbose mode** (`-v`) when debugging
 3. **Check HTML reports** for quality assurance
 4. **Denoising**: Start with `csfwm_6p`, adjust based on data quality
-5. **Permutations**: 10000 for publication, 5000 for exploration
-6. **Smoothing**: 6-8mm FWHM is typical for group analysis
+5. **Temporal censoring**: Use appropriate FD thresholds (0.3-0.5 cm) for your data quality
 
 ---
 
@@ -1135,21 +1091,6 @@ Reduce `n_permutations` (e.g., 5000) or increase `n_jobs` for parallelization.
 | `motion_censoring.min_segment_length` | int | 0 | Min contiguous segment length (scrub); 0=disabled |
 | `min_volumes_retained` | int | 50 | Minimum volumes |
 | `min_fraction_retained` | float | 0.3 | Minimum fraction |
-
-### Group-Level Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `analysis_name` | string | required | Analysis identifier |
-| `smoothing` | float | null | Spatial smoothing FWHM |
-| `covariates` | list | [] | Columns from participants.tsv |
-| `add_intercept` | bool | true | Add intercept to design |
-| `contrast` | string/list | required | Contrast specification |
-| `uncorrected_alpha` | float | 0.001 | Uncorrected threshold |
-| `fdr_alpha` | float | 0.05 | FDR threshold |
-| `fwe_alpha` | float | 0.05 | FWE threshold |
-| `n_permutations` | int | 10000 | Permutation count |
-| `n_jobs` | int | 1 | Parallel jobs |
 
 ---
 

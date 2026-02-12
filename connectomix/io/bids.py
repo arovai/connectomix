@@ -2,8 +2,9 @@
 
 from bids import BIDSLayout
 from pathlib import Path
-from typing import Dict, Optional, Any
+from typing import Dict, List, Optional, Any
 import logging
+import glob
 
 from connectomix.io.paths import validate_bids_dir, validate_derivatives_dir
 
@@ -13,10 +14,10 @@ def create_bids_layout(
     derivatives: Optional[Dict[str, Path]] = None,
     logger: Optional[logging.Logger] = None
 ) -> BIDSLayout:
-    """Create BIDS layout with derivatives.
+    """Create BIDS layout with denoised derivatives.
     
     Args:
-        bids_dir: Path to BIDS dataset root
+        bids_dir: Path to BIDS dataset root or denoised derivatives directory
         derivatives: Dictionary mapping derivative names to paths
         logger: Optional logger instance
     
@@ -42,12 +43,19 @@ def create_bids_layout(
             if logger:
                 logger.debug(f"  Adding {name} derivatives: {path}")
     else:
-        # Try to find fmriprep in standard location
-        default_fmriprep = bids_dir / "derivatives" / "fmriprep"
-        if default_fmriprep.exists():
-            derivatives_list.append(str(default_fmriprep))
+        # Try to find fmridenoiser in standard location
+        default_fmridenoiser = bids_dir / "derivatives" / "fmridenoiser"
+        if default_fmridenoiser.exists():
+            derivatives_list.append(str(default_fmridenoiser))
             if logger:
-                logger.debug(f"  Found fmriprep at default location: {default_fmriprep}")
+                logger.debug(f"  Found fmridenoiser at default location: {default_fmridenoiser}")
+        else:
+            # Check if BIDS_DIR itself contains denoised files
+            denoised_files = glob.glob(str(bids_dir / "**" / "*desc-denoised_bold.nii.gz"), recursive=True)
+            if len(denoised_files) > 0:
+                derivatives_list.append(str(bids_dir))
+                if logger:
+                    logger.debug(f"  Found denoised files in BIDS_DIR, not adding as separate derivative")
     
     # Create layout - derivatives should be a list of paths or False
     layout = BIDSLayout(
@@ -152,7 +160,7 @@ def query_participant_files(
     entities: Dict[str, Any],
     logger: Optional[logging.Logger] = None
 ) -> Dict[str, list]:
-    """Query fMRIPrep files for participant-level analysis.
+    """Query denoised fMRI files for participant-level analysis.
     
     Args:
         layout: BIDSLayout instance
@@ -160,16 +168,18 @@ def query_participant_files(
         logger: Optional logger instance
     
     Returns:
-        Dictionary with keys 'func', 'json', 'confounds' containing file lists
+        Dictionary with keys 'func', 'json' containing file lists
     
     Raises:
-        ValueError: If file counts don't match
+        BIDSError: If no denoised functional files found
     """
-    # Build query parameters
+    from connectomix.utils.exceptions import BIDSError
+    
+    # Build query parameters for denoised files
     query_params = {
         'extension': 'nii.gz',
         'suffix': 'bold',
-        'desc': 'preproc',
+        'desc': 'denoised',
         'scope': 'derivatives',
         'invalid_filters': 'allow',  # Allow derivative-specific entities like 'desc'
     }
@@ -186,76 +196,36 @@ def query_participant_files(
     if entities.get('space'):
         query_params['space'] = entities['space']
     
-    # Query functional files
+    # Query for functional files
     func_files = layout.get(**query_params)
     
-    if logger:
-        logger.info(f"Found {len(func_files)} functional image(s)")
-    
     if len(func_files) == 0:
-        # Attempt a relaxed search (without 'desc') to provide helpful
-        # debugging information to the user about available candidate files.
-        relaxed_q = {k: v for k, v in query_params.items() if k != "desc"}
-        try:
-            candidate_files = layout.get(**relaxed_q)
-        except Exception:
-            candidate_files = []
-
-        candidate_paths = [f.path for f in candidate_files][:10]
-
-        raise ValueError(
-            f"No functional images found matching criteria:\n"
-            f"  {query_params}\n"
-            f"Example candidate files (relaxed search without 'desc'): {candidate_paths}\n"
-            f"Please check your BIDS entities and fMRIPrep outputs. If fMRIPrep "
-            f"is in a non-standard location, specify it with --derivatives "
-            f"(e.g., --derivatives fmriprep=/path/to/fmriprep)."
+        raise BIDSError(
+            f"No denoised functional files found matching criteria: {query_params}\n"
+            f"Connectomix requires denoised fMRI data (desc-denoised_bold).\n"
+            f"Denoised outputs can be obtained from fmridenoiser or similar denoising pipelines.\n"
+            f"If denoised data is in non-standard location, specify with --derivatives"
         )
     
-    # Get corresponding JSON and confounds files
-    json_files = []
-    confounds_files = []
-    
+    # Deduplicate files by path (in case BIDS layout returns duplicates)
+    seen_paths = set()
+    func_files_unique = []
     for func_file in func_files:
-        # Get JSON sidecar
-        json_file = layout.get_metadata(func_file.path)
-        json_files.append(func_file.path.replace('.nii.gz', '.json'))
-        
-        # Get confounds file
-        confounds_query = {
-            'subject': func_file.entities['subject'],
-            'suffix': 'timeseries',
-            'desc': 'confounds',
-            'extension': 'tsv',
-            'scope': 'derivatives',
-            'invalid_filters': 'allow',  # Allow derivative-specific entities
-        }
-        
-        # Add optional entities
-        for entity in ['session', 'task', 'run']:
-            if entity in func_file.entities:
-                confounds_query[entity] = func_file.entities[entity]
-        
-        confounds = layout.get(**confounds_query)
-        
-        if len(confounds) == 0:
-            raise ValueError(
-                f"No confounds file found for {func_file.filename}"
-            )
-        
-        confounds_files.append(confounds[0].path)
+        if func_file.path not in seen_paths:
+            func_files_unique.append(func_file)
+            seen_paths.add(func_file.path)
     
-    # Validate counts match
-    if len(func_files) != len(json_files) or len(func_files) != len(confounds_files):
-        raise ValueError(
-            f"File count mismatch:\n"
-            f"  Functional: {len(func_files)}\n"
-            f"  JSON: {len(json_files)}\n"
-            f"  Confounds: {len(confounds_files)}"
-        )
+    # Get corresponding JSON sidecars
+    json_files = []
+    for func_file in func_files_unique:
+        json_path = func_file.path.replace('.nii.gz', '.json')
+        if Path(json_path).exists():
+            json_files.append(json_path)
+    
+    if logger:
+        logger.info(f"Found {len(func_files_unique)} denoised functional file(s)")
     
     return {
-        'func': [f.path for f in func_files],
-        'json': json_files,
-        'confounds': confounds_files
+        'func': [f.path for f in func_files_unique],
+        'json': json_files
     }

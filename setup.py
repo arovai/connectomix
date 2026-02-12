@@ -26,7 +26,7 @@ if requirements_file.exists():
 setup(
     name="connectomix",
     version=version["__version__"],
-    description="BIDS-compliant functional connectivity analysis from fMRIPrep outputs",
+    description="BIDS-compliant functional connectivity analysis from fmridenoiser-denoised fMRI data",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="LN2T Lab",

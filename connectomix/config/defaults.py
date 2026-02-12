@@ -1,4 +1,15 @@
-"""Default configuration dataclasses for Connectomix."""
+"""Default configuration dataclasses for Connectomix.
+
+Connectomix is a connectivity-only analysis tool that consumes denoised
+fMRI outputs from fmridenoiser (or any BIDS-compliant denoised derivatives).
+Denoising, resampling, and FD-based temporal censoring are handled upstream
+by fmridenoiser. Connectomix focuses on:
+
+- Atlas / seed loading
+- Condition masking (task fMRI: selecting timepoints by condition)
+- Connectivity computation (seed-to-voxel, roi-to-roi, etc.)
+- Group-level analysis
+"""
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
@@ -6,86 +17,61 @@ from pathlib import Path
 
 
 @dataclass
-class MotionCensoringConfig:
-    """Configuration for motion-based censoring.
-    
-    Attributes:
-        enabled: Whether motion censoring is enabled.
-        fd_threshold: Framewise displacement threshold in cm (fMRIPrep reports FD in cm).
-        fd_column: Column name for FD in confounds file.
-        extend_before: Also censor N volumes before high-motion.
-        extend_after: Also censor N volumes after high-motion.
-        min_segment_length: Minimum contiguous segment length to keep (scrubbing).
-            If > 0, continuous segments shorter than this are also censored.
-    """
-    enabled: bool = False
-    fd_threshold: float = 0.5
-    fd_column: str = "framewise_displacement"
-    extend_before: int = 0
-    extend_after: int = 0
-    min_segment_length: int = 0
-
-
-@dataclass
-class ConditionSelectionConfig:
-    """Configuration for condition-based censoring (task fMRI).
+class ConditionMaskingConfig:
+    """Configuration for condition-based masking (task fMRI).
     
     When enabled, separate connectivity matrices are computed for each
     condition, using only timepoints belonging to that condition.
     
+    This replaces the old "temporal censoring" concept. FD-based motion
+    censoring has moved to fmridenoiser. Only condition-based timepoint
+    selection ("condition masking") stays in connectomix.
+    
     Attributes:
-        enabled: Whether condition selection is enabled.
+        enabled: Whether condition masking is enabled.
         events_file: Path to events TSV file, or "auto" to find from BIDS.
         conditions: List of condition names to include (empty = all).
         include_baseline: Include timepoints not in any condition.
         transition_buffer: Seconds to exclude around condition boundaries.
+        min_volumes_retained: Minimum number of volumes required per condition.
+        min_fraction_retained: Minimum fraction of volumes required.
+        warn_fraction_retained: Warn if retention falls below this.
     """
     enabled: bool = False
     events_file: Optional[str] = "auto"
     conditions: List[str] = field(default_factory=list)
     include_baseline: bool = False
     transition_buffer: float = 0.0
-
-
-@dataclass
-class TemporalCensoringConfig:
-    """Configuration for temporal censoring.
-    
-    Temporal censoring removes specific timepoints (volumes) from fMRI data
-    before connectivity analysis. This is useful for:
-    
-    - **Dummy scan removal**: Discard initial volumes during scanner equilibration.
-    - **Motion scrubbing**: Remove high-motion timepoints (based on FD).
-    - **Condition selection**: For task fMRI, analyze only specific conditions.
-    
-    By default, temporal censoring is disabled. Enable specific features
-    by setting the appropriate sub-configurations.
-    
-    Attributes:
-        enabled: Master switch for temporal censoring.
-        stage: When to apply censoring ("before_denoising" or "after_denoising").
-        drop_initial_volumes: Number of initial volumes to drop.
-        motion_censoring: Motion-based censoring configuration.
-        condition_selection: Condition-based censoring configuration.
-        custom_mask_file: Path to custom censoring mask TSV.
-        min_volumes_retained: Minimum number of volumes required.
-        min_fraction_retained: Minimum fraction of volumes required.
-        warn_fraction_retained: Warn if retention falls below this.
-    """
-    enabled: bool = False
-    stage: str = "before_denoising"
-    drop_initial_volumes: int = 0
-    motion_censoring: MotionCensoringConfig = field(default_factory=MotionCensoringConfig)
-    condition_selection: ConditionSelectionConfig = field(default_factory=ConditionSelectionConfig)
-    custom_mask_file: Optional[Path] = None
     min_volumes_retained: int = 50
     min_fraction_retained: float = 0.3
     warn_fraction_retained: float = 0.5
 
 
 @dataclass
+class TemporalCensoringConfig:
+    """Configuration for temporal censoring (deprecated in connectomix).
+    
+    Temporal censoring (motion-based scrubbing) is now handled upstream by
+    fmridenoiser. This class is kept for backward compatibility and to enable
+    condition-based timepoint selection via the condition_masking config.
+    
+    Attributes:
+        enabled: Whether temporal censoring is enabled (usually False).
+    """
+    enabled: bool = False
+    drop_initial_volumes: int = 0
+    motion_censoring: Dict = field(default_factory=lambda: {"enabled": False})
+    condition_selection: Dict = field(default_factory=lambda: {"enabled": False})
+    min_volumes_retained: int = 50
+
+
+@dataclass
 class ParticipantConfig:
-    """Configuration for participant-level analysis.
+    """Configuration for participant-level connectivity analysis.
+    
+    Connectomix consumes denoised fMRI data produced by fmridenoiser (or
+    any BIDS-compliant denoised derivatives). It does NOT perform denoising,
+    resampling, or FD-based temporal censoring—those are upstream steps.
     
     Attributes:
         subject: List of subject IDs to process
@@ -93,12 +79,8 @@ class ParticipantConfig:
         sessions: List of session IDs to process
         runs: List of run IDs to process
         spaces: List of space names to process
-        confounds: List of confound column names for regression
-        high_pass: High-pass filter cutoff in Hz
-        low_pass: Low-pass filter cutoff in Hz
-        ica_aroma: Use ICA-AROMA denoised files
-        reference_functional_file: Reference image path or "first_functional_file"
-        overwrite_denoised_files: Whether to re-denoise if files exist
+        label: Custom label for output filenames
+        denoised_derivatives: Path to denoised derivatives (fmridenoiser output)
         method: Analysis method (seedToVoxel, roiToVoxel, seedToSeed, roiToRoi)
         seeds_file: Path to TSV file with seed coordinates (for seed methods)
         radius: Sphere radius in mm (for seed methods)
@@ -108,6 +90,7 @@ class ParticipantConfig:
         n_components: Number of ICA components (for CanICA)
         canica_threshold: Threshold for extracting regions from ICA components
         canica_min_region_size: Minimum region size in voxels (for CanICA)
+        condition_masking: Configuration for condition-based timepoint selection
     """
     
     # BIDS entity filters
@@ -120,18 +103,8 @@ class ParticipantConfig:
     # Custom label for output filenames
     label: Optional[str] = None
     
-    # Preprocessing/denoising
-    denoising_strategy: Optional[str] = None  # Name of predefined denoising strategy (if used)
-    confounds: List[str] = field(default_factory=lambda: [
-        "csf", "white_matter",
-        "trans_x", "trans_y", "trans_z", 
-        "rot_x", "rot_y", "rot_z"
-    ])
-    high_pass: float = 0.01
-    low_pass: float = 0.08
-    ica_aroma: bool = False
-    reference_functional_file: str = "first_functional_file"
-    overwrite_denoised_files: bool = False  # Skip denoising if file exists
+    # Input: path to denoised derivatives (fmridenoiser or compatible output)
+    denoised_derivatives: Optional[Path] = None
     
     # Analysis method
     method: str = "roiToRoi"
@@ -152,7 +125,10 @@ class ParticipantConfig:
     canica_threshold: float = 1.0
     canica_min_region_size: int = 50
     
-    # Temporal censoring configuration
+    # Condition masking configuration (task fMRI condition-based timepoint selection)
+    condition_masking: ConditionMaskingConfig = field(default_factory=ConditionMaskingConfig)
+    
+    # Temporal censoring configuration (deprecated - kept for backward compatibility)
     temporal_censoring: TemporalCensoringConfig = field(default_factory=TemporalCensoringConfig)
     
     def validate(self) -> None:
@@ -171,10 +147,6 @@ class ParticipantConfig:
             ["seedToVoxel", "roiToVoxel", "seedToSeed", "roiToRoi"],
             "method"
         )
-        
-        # Validate alpha values
-        validator.validate_alpha(self.high_pass, "high_pass")
-        validator.validate_alpha(self.low_pass, "low_pass")
         
         # Validate positive values
         validator.validate_positive(self.radius, "radius")
@@ -201,14 +173,11 @@ class ParticipantConfig:
                     f"atlas is required for method '{self.method}'"
                 )
         
-        # Validate ICA-AROMA incompatibility with motion parameters
-        if self.ica_aroma:
-            motion_params = ["trans_x", "trans_y", "trans_z", "rot_x", "rot_y", "rot_z"]
-            motion_in_confounds = any(mp in self.confounds for mp in motion_params)
-            if motion_in_confounds:
+        # Validate denoised derivatives path if provided
+        if self.denoised_derivatives is not None:
+            if not Path(self.denoised_derivatives).exists():
                 validator.errors.append(
-                    "ICA-AROMA is incompatible with motion parameters in confounds. "
-                    "Remove motion parameters from confounds list."
+                    f"denoised_derivatives path does not exist: {self.denoised_derivatives}"
                 )
         
         # Raise if any errors

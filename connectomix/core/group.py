@@ -32,7 +32,6 @@ def run_group_pipeline(
     bids_dir: Path,
     output_dir: Path,
     config: GroupConfig,
-    derivatives: Optional[Dict[str, Path]] = None,
     logger: Optional[logging.Logger] = None,
 ) -> List[Path]:
     """Run the group-level tangent space connectivity pipeline.
@@ -48,8 +47,6 @@ def run_group_pipeline(
         bids_dir: Path to BIDS dataset root.
         output_dir: Path for output derivatives.
         config: GroupConfig instance with analysis parameters.
-        derivatives: Optional dict mapping derivative names to paths.
-            Should contain 'connectomix' key pointing to participant outputs.
         logger: Logger instance. If None, creates one.
     
     Returns:
@@ -72,8 +69,6 @@ def run_group_pipeline(
     # Determine participant derivatives path
     if config.participant_derivatives:
         participant_dir = Path(config.participant_derivatives)
-    elif derivatives and 'connectomix' in derivatives:
-        participant_dir = derivatives['connectomix']
     else:
         # Default: look in output_dir (assumes participant-level already run)
         participant_dir = output_dir

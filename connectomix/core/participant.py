@@ -25,7 +25,6 @@ from connectomix.preprocessing.resampling import (
     resample_to_reference,
     save_geometry_info,
 )
-from connectomix.preprocessing.denoising import denoise_image
 from connectomix.preprocessing.canica import run_canica_atlas
 from connectomix.preprocessing.censoring import (
     TemporalCensor,
@@ -66,7 +65,7 @@ def run_participant_pipeline(
         output_dir: Path for output derivatives.
         config: ParticipantConfig instance with analysis parameters.
         derivatives: Optional dict mapping derivative names to paths.
-            If None, looks for fmriprep in standard location.
+            If None, looks for fmridenoiser or fmriprep in standard location.
         logger: Logger instance. If None, creates one.
     
     Returns:
@@ -150,7 +149,7 @@ def run_participant_pipeline(
         # Build entity filter from config
         entities = _build_entity_filter(config)
         
-        # Query fMRIPrep files
+        # Query denoised files (from fmridenoiser or fMRIPrep)
         files = query_participant_files(layout, entities, logger)
         
         n_files = len(files['func'])
@@ -159,7 +158,10 @@ def run_participant_pipeline(
         if n_files == 0:
             raise BIDSError(
                 "No functional files found matching the specified criteria.\n"
-                "Please check your BIDS entities and fMRIPrep outputs."
+                "Connectomix requires either:\n"
+                "  (1) fmridenoiser denoised outputs (desc-denoised_bold), or\n"
+                "  (2) fMRIPrep preprocessed outputs (desc-preproc_bold)\n"
+                "Please check your BIDS entities and ensure preprocessing outputs exist."
             )
         
         # === Step 3: Geometric consistency check ===
@@ -168,23 +170,18 @@ def run_participant_pipeline(
         # Get ALL functional files for geometry check (not just selected)
         all_func_files = _get_all_functional_files(layout, entities, logger)
         
-        # Determine reference image and path FIRST (before consistency check)
-        # The reference should be from ALL files in dataset for consistency across participants
-        if config.reference_functional_file == "first_functional_file":
-            reference_path = Path(all_func_files[0])
-            reference_img = nib.load(reference_path)
-            logger.info(f"Using first functional file from dataset as reference: {reference_path.name}")
-        else:
-            reference_path = Path(config.reference_functional_file)
-            reference_img = nib.load(reference_path)
-            logger.info(f"Using custom reference: {reference_path}")
+        # Use first functional file as reference for consistency checking
+        # (Connectomix no longer performs denoising/resampling, so reference_functional_file config is not needed)
+        reference_path = Path(all_func_files[0])
+        reference_img = nib.load(reference_path)
+        logger.info(f"Using first functional file as reference: {reference_path.name}")
         
-        # Check consistency using the same reference that will be used for resampling
+        # Check consistency across files
         is_consistent, geometries = check_geometric_consistency(
             all_func_files, logger, reference_file=reference_path
         )
         
-        # Log reference geometry at INFO level if resampling will be needed
+        # Log reference geometry at INFO level if files are inconsistent
         if not is_consistent:
             ref_shape = reference_img.shape[:3]
             ref_voxel = [float(reference_img.header.get_zooms()[i]) for i in range(3)]
@@ -235,20 +232,13 @@ def run_participant_pipeline(
         # === Step 6: Process each functional file ===
         log_section(logger, "Processing")
         
-        for i, (func_path, confounds_path) in enumerate(
-            zip(files['func'], files['confounds'])
-        ):
+        for i, func_path in enumerate(files['func']):
             func_path = Path(func_path)
-            confounds_path = Path(confounds_path)
             
             logger.info(f"Processing file {i+1}/{n_files}: {func_path.name}")
             
             # Extract entities from filename
             file_entities = _extract_entities_from_path(func_path)
-            
-            # Add denoising strategy to entities if using a predefined strategy
-            if config.denoising_strategy:
-                file_entities['denoise'] = config.denoising_strategy
             
             # Track all connectivity outputs for this file
             connectivity_paths = []
@@ -305,38 +295,13 @@ def run_participant_pipeline(
                     input_for_denoise = resampled_path
                 else:
                     func_img = nib.load(func_path)
-                    input_for_denoise = func_path
+                    denoised_func_path = func_path
                 
-                # Load the input image for denoising (for histogram comparison)
-                input_img_for_histogram = nib.load(input_for_denoise)
+                # Use the already-denoised functional image
+                denoised_img = nib.load(denoised_func_path)
                 
-                # --- Denoise ---
-                denoised_path = _get_output_path(
-                    output_dir, file_entities, "denoised", "bold", ".nii.gz",
-                    label=config.label, subfolder="func"
-                )
-                
-                denoise_image(
-                    input_for_denoise,
-                    confounds_path,
-                    config.confounds,
-                    config.high_pass,
-                    config.low_pass,
-                    denoised_path,
-                    logger,
-                    overwrite=config.overwrite_denoised_files,
-                )
-                outputs['denoised'].append(denoised_path)
-                
-                # Load denoised image for connectivity
-                denoised_img = nib.load(denoised_path)
-                
-                # Compute denoising histogram data for QA report
-                from connectomix.preprocessing.denoising import compute_denoising_histogram_data
-                denoising_histogram_data = compute_denoising_histogram_data(
-                    original_img=input_img_for_histogram,
-                    denoised_img=denoised_img,
-                )
+                # Denoising histogram data is not needed since input is already denoised
+                denoising_histogram_data = None
                 
                 # --- Apply temporal censoring if enabled ---
                 censor = None
@@ -346,7 +311,6 @@ def run_participant_pipeline(
                     censor, censoring_summary = _apply_temporal_censoring(
                         denoised_img=denoised_img,
                         func_path=func_path,
-                        confounds_path=confounds_path,
                         layout=layout,
                         config=config,
                         logger=logger,
@@ -456,7 +420,6 @@ def run_participant_pipeline(
                     file_entities=file_entities,
                     config=config,
                     output_dir=output_dir,
-                    confounds_path=confounds_path,
                     connectivity_paths=connectivity_paths,
                     atlas_labels=atlas_labels,
                     logger=logger,
@@ -528,17 +491,6 @@ def _build_cli_command(
     if config.method in ["roiToRoi", "seedToSeed"] and config.atlas:
         parts.append(f"--atlas {config.atlas}")
     
-    # Add denoising options - show ALL confounds for full reproducibility
-    if config.confounds:
-        confounds_str = " ".join(config.confounds)
-        parts.append(f"--confounds {confounds_str}")
-    
-    if config.high_pass:
-        parts.append(f"--high-pass {config.high_pass}")
-    
-    if config.low_pass:
-        parts.append(f"--low-pass {config.low_pass}")
-    
     # Add temporal censoring options if enabled
     if config.temporal_censoring.enabled:
         tc = config.temporal_censoring
@@ -568,7 +520,6 @@ def _generate_participant_report(
     file_entities: Dict[str, str],
     config: ParticipantConfig,
     output_dir: Path,
-    confounds_path: Path,
     connectivity_paths: List[Path],
     atlas_labels: Optional[List[str]],
     logger: logging.Logger,
@@ -590,8 +541,6 @@ def _generate_participant_report(
         Configuration object.
     output_dir : Path
         Output directory.
-    confounds_path : Path
-        Path to confounds file.
     connectivity_paths : list
         List of connectivity output paths.
     atlas_labels : list or None
@@ -608,6 +557,8 @@ def _generate_participant_report(
         Dictionary mapping connectivity kind to matrix (for roiToRoi method).
     roi_names : list or None
         List of ROI names for connectivity matrices.
+    denoising_histogram_data : dict or None
+        Denoising histogram data (not used since connectomix consumes denoised data).
     resampling_info : dict or None
         Information about resampling performed (reference, original geometry, etc.).
     
@@ -619,20 +570,8 @@ def _generate_participant_report(
     try:
         log_section(logger, "Generating HTML Report")
         
-        # Load confounds for denoising plots
-        confounds_df = pd.read_csv(confounds_path, sep='\t')
-        
-        # Use the same wildcard expansion as denoising to get exact confound names
-        from connectomix.io.readers import expand_confound_wildcards
-        selected_confounds = expand_confound_wildcards(
-            config.confounds, 
-            confounds_df.columns.tolist()
-        )
-        
-        if not selected_confounds:
-            # Fall back to some common confounds
-            common = ['trans_x', 'trans_y', 'trans_z', 'rot_x', 'rot_y', 'rot_z']
-            selected_confounds = [c for c in common if c in confounds_df.columns]
+        # No confounds metadata since connectomix uses pre-denoised data from fmridenoiser
+        selected_confounds = []
         
         # Use provided connectivity matrices, or load from file for backward compatibility
         if connectivity_matrices is None:
@@ -686,18 +625,23 @@ def _generate_participant_report(
         if connectivity_matrices:
             primary_matrix = connectivity_matrices.get('correlation')
         
+        # Add denoising strategy to desc if available (to differentiate reports)
+        # The denoise entity is extracted from file_entities (e.g., 'scrubbing5' or 'simpleGSR')
+        if file_entities.get('denoise'):
+            desc_for_report = f"{file_entities['denoise']}_desc-{desc}" if desc else f"{file_entities['denoise']}"
+        else:
+            desc_for_report = desc
+        
         # Create report generator
         report = ParticipantReportGenerator(
             subject_id=subject_label,
             config=config,
             output_dir=output_dir,
-            confounds_df=confounds_df,
-            selected_confounds=selected_confounds,
             connectivity_matrix=primary_matrix,
             roi_names=roi_names,
             connectivity_paths=connectivity_paths,
             logger=logger,
-            desc=desc,
+            desc=desc_for_report,
             label=config.label,
             censoring_summary=censoring_summary,
             condition=condition,
@@ -737,7 +681,6 @@ def _generate_participant_report(
 def _apply_temporal_censoring(
     denoised_img: nib.Nifti1Image,
     func_path: Path,
-    confounds_path: Path,
     layout: "BIDSLayout",
     config: ParticipantConfig,
     logger: logging.Logger,
@@ -750,8 +693,6 @@ def _apply_temporal_censoring(
         Denoised functional image.
     func_path : Path
         Original functional file path (for finding events file).
-    confounds_path : Path
-        Path to confounds file.
     layout : BIDSLayout
         BIDS layout for finding events file.
     config : ParticipantConfig
@@ -799,13 +740,13 @@ def _apply_temporal_censoring(
     
     # Apply motion censoring
     if config.temporal_censoring.motion_censoring.enabled:
-        confounds_df = pd.read_csv(confounds_path, sep='\t')
-        censor.apply_motion_censoring(confounds_df)
-        
-        # Apply segment filtering (scrubbing) if configured
-        min_seg = config.temporal_censoring.motion_censoring.min_segment_length
-        if min_seg > 0:
-            censor.apply_segment_filtering(min_seg)
+        # Try to find confounds file from the original BIDS dataset
+        # (since confounds are not in fmridenoiser output)
+        logger.warning(
+            "Motion censoring requested, but connectomix operates on denoised data "
+            "from fmridenoiser. Motion metrics are not available in fmridenoiser output. "
+            "Skipping motion censoring."
+        )
     
     # Apply condition selection
     if config.temporal_censoring.condition_selection.enabled:
@@ -871,19 +812,28 @@ def _get_all_functional_files(
     logger: logging.Logger,
 ) -> List[Path]:
     """Get ALL functional files for geometry check, not just selected ones."""
-    # Query all fMRIPrep outputs (ignoring subject filter)
+    # Try denoised first (from fmridenoiser), then preproc (from fMRIPrep)
     query = {
         'extension': 'nii.gz',
         'suffix': 'bold',
-        'desc': 'preproc',
         'scope': 'derivatives',
+        'invalid_filters': 'allow',
     }
     
     # Keep space filter for consistency
     if entities.get('space'):
         query['space'] = entities['space']
     
-    all_files = layout.get(**query)
+    # Try denoised files first
+    query_denoised = query.copy()
+    query_denoised['desc'] = 'denoised'
+    all_files = layout.get(**query_denoised)
+    
+    # If no denoised files, try preproc
+    if len(all_files) == 0:
+        query_preproc = query.copy()
+        query_preproc['desc'] = 'preproc'
+        all_files = layout.get(**query_preproc)
     
     logger.debug(f"Found {len(all_files)} total functional files for geometry check")
     
