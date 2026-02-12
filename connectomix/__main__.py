@@ -3,6 +3,7 @@
 import sys
 import logging
 from pathlib import Path
+from typing import Optional
 
 from connectomix.cli import create_parser, parse_derivatives_arg
 from connectomix.utils.logging import setup_logging
@@ -53,44 +54,52 @@ def main():
             # Get participant labels to process (convert to list if needed)
             participant_labels = args.participant_label if args.participant_label else [None]
             
+            # Get conditions to process (convert to list if needed)
+            # If multiple conditions provided, each runs as independent analysis
+            has_conditions = hasattr(args, 'conditions') and args.conditions
+            conditions_to_loop = args.conditions if has_conditions else [None]
+            
             # Loop over each participant label
             for participant_label in participant_labels:
-                # Create fresh config for each participant
-                if args.config:
-                    config_dict = load_config_file(args.config)
-                    config = ParticipantConfig(**config_dict)
-                else:
-                    config = ParticipantConfig()
-                
-                # Override config with CLI arguments
-                if participant_label:
-                    config.subject = [participant_label]
-                # Note: config uses plural field names for tasks/sessions/runs/spaces
-                if args.task:
-                    config.tasks = [args.task]
-                if args.session:
-                    config.sessions = [args.session]
-                if args.run:
-                    config.runs = [args.run]
-                if args.space:
-                    config.spaces = [args.space]
-                if args.label:
-                    config.label = args.label
-                if args.atlas:
-                    config.atlas = args.atlas
-                if args.method:
-                    config.method = args.method
-                
-                # Handle condition-based masking CLI options
-                _configure_condition_masking(args, config, logger)
-                
-                run_participant_pipeline(
-                    bids_dir=args.bids_dir,
-                    output_dir=args.output_dir,
-                    config=config,
-                    derivatives=derivatives_dict,
-                    logger=logger,
-                )
+                # Loop over each condition (if provided)
+                for condition in conditions_to_loop:
+                    # Create fresh config for each participant/condition combination
+                    if args.config:
+                        config_dict = load_config_file(args.config)
+                        config = ParticipantConfig(**config_dict)
+                    else:
+                        config = ParticipantConfig()
+                    
+                    # Override config with CLI arguments
+                    if participant_label:
+                        config.subject = [participant_label]
+                    # Note: config uses plural field names for tasks/sessions/runs/spaces
+                    if args.task:
+                        config.tasks = [args.task]
+                    if args.session:
+                        config.sessions = [args.session]
+                    if args.run:
+                        config.runs = [args.run]
+                    if args.space:
+                        config.spaces = [args.space]
+                    if args.label:
+                        config.label = args.label
+                    if args.atlas:
+                        config.atlas = args.atlas
+                    if args.method:
+                        config.method = args.method
+                    
+                    # Handle condition-based masking CLI options
+                    # For each loop iteration, pass only the current condition
+                    _configure_condition_masking(args, config, logger, condition)
+                    
+                    run_participant_pipeline(
+                        bids_dir=args.bids_dir,
+                        output_dir=args.output_dir,
+                        config=config,
+                        derivatives=derivatives_dict,
+                        logger=logger,
+                    )
         else:  # group
             # Load or create group config
             if args.config:
@@ -137,32 +146,43 @@ def main():
         sys.exit(1)
 
 
-def _configure_condition_masking(args, config: ParticipantConfig, logger: logging.Logger):
+def _configure_condition_masking(args, config: ParticipantConfig, logger: logging.Logger, condition: Optional[str] = None):
     """Configure condition-based masking from CLI arguments.
+    
+    When multiple conditions are provided via --conditions, this function is called
+    once per condition to run independent analyses. Each call receives a single
+    condition value (or None if conditions weren't specified).
     
     Args:
         args: Parsed CLI arguments.
         config: ParticipantConfig to update.
         logger: Logger instance.
+        condition: Single condition value (from loop iteration). If provided, only
+                  this condition is used. If None, uses all conditions from args.
     """
     # Check if condition-based masking is enabled
-    has_conditions = hasattr(args, 'conditions') and args.conditions
+    has_conditions = condition is not None or (hasattr(args, 'conditions') and args.conditions)
     
     if not has_conditions:
         return  # No condition-based masking specified
     
+    # Determine which conditions to use:
+    # - If iterating with a single condition, use just that one
+    # - Otherwise, use all conditions from args (should be single value for non-looped case)
+    conditions_to_set = [condition] if condition else args.conditions
+    
     # Enable condition masking in both config paths
     # (condition_masking is the new primary config)
     config.condition_masking.enabled = True
-    config.condition_masking.conditions = args.conditions
-    logger.info(f"Condition-based masking enabled: {args.conditions}")
+    config.condition_masking.conditions = conditions_to_set
+    logger.info(f"Condition-based masking enabled: {conditions_to_set}")
     
     # Also enable temporal_censoring (required for _apply_temporal_censoring to run)
     config.temporal_censoring.enabled = True
     # Store conditions in legacy config path for backward compatibility
     config.temporal_censoring.condition_selection = {
         'enabled': True,
-        'conditions': args.conditions,
+        'conditions': conditions_to_set,
     }
     
     if hasattr(args, 'events_file') and args.events_file:
