@@ -165,6 +165,7 @@ def _generate_group_report(
     task: Optional[str],
     session: Optional[str],
     logger: logging.Logger,
+    denoising_strategy: Optional[str] = None,
 ) -> Path:
     """Generate HTML report for group analysis."""
     from connectomix.utils.reports import GroupReportGenerator
@@ -177,6 +178,7 @@ def _generate_group_report(
         output_dir=group_dir,
         task=task,
         session=session,
+        denoising_strategy=denoising_strategy or getattr(config, 'denoising_strategy', None),
     )
     
     return report.generate()

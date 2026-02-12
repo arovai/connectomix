@@ -865,27 +865,23 @@ output_dir/
 │   └── backups/
 │       └── config_TIMESTAMP.json     # Configuration backups
 ├── sub-01/
-│   ├── figures/                      # Report figures
-│   │   ├── connectivity_correlation.png
-│   │   ├── connectivity_covariance.png
-│   │   ├── connectivity_partial-correlation.png
-│   │   ├── connectivity_precision.png
-│   │   ├── connectome_correlation.png      # Glass brain plots
-│   │   ├── histogram_correlation.png       # Value distributions
-│   │   ├── confounds_timeseries.png
-│   │   ├── confounds_correlation.png
-│   │   ├── denoising-histogram.png         # Before/after denoising
-│   │   └── temporal_censoring.png
+│   ├── figures/                      # Report figures (with denoising strategy)
+│   │   ├── connectivity_correlation_denoise-simpleGSR.png
+│   │   ├── connectivity_covariance_denoise-simpleGSR.png
+│   │   ├── connectivity_partial-correlation_denoise-simpleGSR.png
+│   │   ├── connectivity_precision_denoise-simpleGSR.png
+│   │   ├── histogram_correlation_denoise-simpleGSR.png       # Value distributions
+│   │   ├── temporal_censoring_denoise-simpleGSR.png
+│   │   └── sub-01_report_denoise-simpleGSR.html
 │   ├── func/                         # Denoised functional data
 │   │   ├── sub-01_task-rest_desc-denoised_bold.nii.gz
 │   │   └── sub-01_task-rest_desc-denoised_bold.json
-│   ├── connectivity_data/            # Connectivity matrices & time series
-│   │   ├── sub-01_task-rest_atlas-schaefer_desc-correlation_connectivity.npy
-│   │   ├── sub-01_task-rest_atlas-schaefer_desc-covariance_connectivity.npy
-│   │   ├── sub-01_task-rest_atlas-schaefer_desc-partial-correlation_connectivity.npy
-│   │   ├── sub-01_task-rest_atlas-schaefer_desc-precision_connectivity.npy
-│   │   └── sub-01_task-rest_atlas-schaefer_timeseries.npy
-│   └── sub-01_task-rest_desc-schaefer_report.html
+│   └── connectivity_data/            # Connectivity matrices & time series
+│       ├── sub-01_task-rest_atlas-schaefer_desc-correlation_connectivity.npy
+│       ├── sub-01_task-rest_atlas-schaefer_desc-covariance_connectivity.npy
+│       ├── sub-01_task-rest_atlas-schaefer_desc-partial-correlation_connectivity.npy
+│       ├── sub-01_task-rest_atlas-schaefer_desc-precision_connectivity.npy
+│       └── sub-01_task-rest_atlas-schaefer_timeseries.npy
 ├── sub-02/
 │   └── ...
 ```

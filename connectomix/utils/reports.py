@@ -760,6 +760,7 @@ class ParticipantReportGenerator:
         condition: Optional[str] = None,
         censoring: Optional[str] = None,
         resampling_info: Optional[Dict[str, Any]] = None,
+        denoising_strategy: Optional[str] = None,
     ):
         """Initialize report generator.
         
@@ -783,6 +784,7 @@ class ParticipantReportGenerator:
             condition: Condition name for filename (when --conditions is used)
             censoring: Censoring method entity for filename (e.g., 'fd05')
             resampling_info: Information about resampling performed (reference, original geometry, etc.)
+            denoising_strategy: Denoising strategy used (e.g., 'scrubbing5', 'simpleGSR')
         """
         self.subject_id = subject_id
         self.session = session
@@ -816,6 +818,9 @@ class ParticipantReportGenerator:
         self.confounds_used: List[str] = selected_confounds or []
         self.confounds_df: Optional[pd.DataFrame] = confounds_df
         self.denoising_histogram_data: Optional[Dict[str, Any]] = None
+        
+        # Denoising strategy - use parameter if provided, otherwise try config
+        self.denoising_strategy = denoising_strategy or getattr(config, 'denoising_strategy', None)
         
         # Connectivity results
         self.connectivity_matrices: List[Tuple[np.ndarray, List[str], str]] = []
@@ -852,12 +857,66 @@ class ParticipantReportGenerator:
         buffer.close()
         return img_data
     
-    def _save_figure_to_disk(self, fig: plt.Figure, filename: str, dpi: int = 150) -> Optional[Path]:
-        """Save figure to the figures directory.
+    def _build_bids_figure_filename(self, figure_type: str, desc: str) -> str:
+        """Build BIDS-compliant figure filename with all entities.
+        
+        Pattern: sub-<label>[_ses-<session>][_task-<task>][_space-<space>][_denoise-<method>]
+                 [_method-<method>][_atlas-<atlas>][_desc-<desc>][_<figure_type>].<ext>
+        
+        Args:
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description (e.g., 'correlation', 'covariance')
+            
+        Returns:
+            BIDS-compliant filename like: sub-01_task-rest_atlas-schaefer2018n100_desc-correlation_connectivity.png
+        """
+        # Extract subject ID from subject_id (which may be 'sub-01' or 'sub-01_ses-1_task-rest', etc.)
+        if self.subject_id.startswith('sub-'):
+            # Parse BIDS entities from subject_id
+            parts = self.subject_id.split('_')
+            sub_part = parts[0]  # sub-XX
+        else:
+            sub_part = f"sub-{self.subject_id}"
+        
+        # Build entity components in BIDS order
+        filename_parts = [sub_part]
+        
+        if self.session:
+            filename_parts.append(f"ses-{self.session}")
+        
+        if self.task:
+            filename_parts.append(f"task-{self.task}")
+        
+        if self.space:
+            filename_parts.append(f"space-{self.space}")
+        
+        # Add denoising strategy
+        if self.denoising_strategy and self.denoising_strategy != "none":
+            filename_parts.append(f"denoise-{self.denoising_strategy}")
+        
+        # Add method (analysis type)
+        if hasattr(self.config, 'method') and self.config.method:
+            filename_parts.append(f"method-{self.config.method}")
+        
+        # Add atlas
+        if hasattr(self.config, 'atlas') and self.config.atlas:
+            filename_parts.append(f"atlas-{self.config.atlas}")
+        
+        # Add description
+        if desc:
+            filename_parts.append(f"desc-{desc}")
+        
+        # Add figure type as suffix
+        base_filename = "_".join(filename_parts)
+        return f"{base_filename}_{figure_type}.png"
+    
+    def _save_figure_to_disk(self, fig: plt.Figure, figure_type: str, desc: str, dpi: int = 150) -> Optional[Path]:
+        """Save figure to the figures directory with BIDS-compliant filename.
         
         Args:
             fig: Matplotlib figure to save
-            filename: Filename for the saved figure (without path)
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description entity (e.g., 'correlation', 'covariance')
             dpi: Resolution for saving
             
         Returns:
@@ -868,6 +927,8 @@ class ParticipantReportGenerator:
         
         try:
             self.figures_dir.mkdir(parents=True, exist_ok=True)
+            # Build BIDS-compliant filename
+            filename = self._build_bids_figure_filename(figure_type, desc)
             fig_path = self.figures_dir / filename
             fig.savefig(fig_path, format='png', dpi=dpi, bbox_inches='tight',
                         facecolor='white', edgecolor='none')
@@ -1609,7 +1670,8 @@ class ParticipantReportGenerator:
         if censor_fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(censor_fig)
-            self._save_figure_to_disk(censor_fig, 'temporal_censoring.png')
+            saved_censor_path = self._save_figure_to_disk(censor_fig, 'censoring', 'temporal')
+            actual_censor_filename = saved_censor_path.name if saved_censor_path else 'censoring.png'
             plt.close(censor_fig)
             
             html += f'''
@@ -1617,7 +1679,7 @@ class ParticipantReportGenerator:
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'temporal_censoring.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_censor_filename}')">
                         ⬇️ Download
                     </button>
                 </div>
@@ -1883,9 +1945,17 @@ class ParticipantReportGenerator:
                 fig_id = self._get_unique_figure_id()
                 img_data = self._figure_to_base64(fig, dpi=150)
                 
-                # Save figure to disk
-                fig_filename = f"connectivity_{name}.png"
-                self._save_figure_to_disk(fig, fig_filename, dpi=150)
+                # Save figure to disk with BIDS-compliant name
+                # Map connectivity type names to BIDS-friendly descriptions
+                desc_map = {
+                    'correlation': 'correlation',
+                    'covariance': 'covariance',
+                    'partial correlation': 'partial-correlation',
+                    'precision': 'precision'
+                }
+                desc = desc_map.get(connectivity_type, connectivity_type.replace(' ', '-'))
+                saved_fig_path = self._save_figure_to_disk(fig, 'connectivity', desc, dpi=150)
+                actual_fig_filename = saved_fig_path.name if saved_fig_path else 'connectivity.png'
                 
                 plt.close(fig)
                 
@@ -1947,7 +2017,7 @@ class ParticipantReportGenerator:
                 <div class="figure-container">
                     <div class="figure-wrapper">
                         <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{fig_id}', 'connectivity_{name}.png')">
+                        <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_fig_filename}')">
                             ⬇️ Download
                         </button>
                     </div>
@@ -1964,15 +2034,17 @@ class ParticipantReportGenerator:
                 if hist_fig is not None:
                     hist_fig_id = self._get_unique_figure_id()
                     hist_img_data = self._figure_to_base64(hist_fig, dpi=150)
-                    hist_filename = f"histogram_{name}.png"
-                    self._save_figure_to_disk(hist_fig, hist_filename, dpi=150)
+                    # Save with BIDS-compliant name (append "histogram" to description)
+                    hist_desc = f"{desc}-histogram"
+                    saved_hist_path = self._save_figure_to_disk(hist_fig, 'histogram', hist_desc, dpi=150)
+                    actual_hist_filename = saved_hist_path.name if saved_hist_path else 'histogram.png'
                     plt.close(hist_fig)
                     
                     html += f'''
                 <div class="figure-container">
                     <div class="figure-wrapper">
                         <img id="{hist_fig_id}" src="data:image/png;base64,{hist_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{hist_fig_id}', '{hist_filename}')">
+                        <button class="download-btn" onclick="downloadFigure('{hist_fig_id}', '{actual_hist_filename}')">
                             ⬇️ Download
                         </button>
                     </div>
@@ -2472,6 +2544,7 @@ class GroupReportGenerator:
         session: Optional[str] = None,
         atlas_coords: Optional[np.ndarray] = None,
         roi_labels: Optional[List[str]] = None,
+        denoising_strategy: Optional[str] = None,
     ):
         """Initialize group report generator.
         
@@ -2488,6 +2561,7 @@ class GroupReportGenerator:
             session: Session name (optional).
             atlas_coords: ROI coordinates for connectome plots (optional).
             roi_labels: ROI labels for matrix annotations (optional).
+            denoising_strategy: Denoising strategy used (e.g., 'scrubbing5', 'simpleGSR').
         """
         self.results = results
         self.config = config
@@ -2508,14 +2582,54 @@ class GroupReportGenerator:
         self.figures_dir = self.output_dir / "figures"
         self.figures_dir.mkdir(parents=True, exist_ok=True)
         
-        self._logger = logger
+        self._logger = logger if 'logger' in locals() else logging.getLogger(__name__)
         self._figure_counter = 0
         self.toc_items = []
+        
+        # Denoising strategy - use parameter if provided, otherwise try config
+        self.denoising_strategy = denoising_strategy or getattr(config, 'denoising_strategy', None)
     
     def _get_unique_figure_id(self) -> str:
         """Generate unique figure ID."""
         self._figure_counter += 1
         return f"fig_group_{self._figure_counter}"
+    
+    def _build_bids_figure_filename(self, figure_type: str, desc: str) -> str:
+        """Build BIDS-compliant figure filename for group-level analysis.
+        
+        Pattern: [task-<task>][_ses-<session>][_denoise-<method>][_atlas-<atlas>]
+                 [_desc-<desc>][_<figure_type>].<ext>
+        
+        Args:
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description (e.g., 'correlation', 'deviations')
+            
+        Returns:
+            BIDS-compliant filename like: task-rest_atlas-schaefer2018n100_desc-deviations_connectivity.png
+        """
+        filename_parts = ["group"]
+        
+        if self.task:
+            filename_parts.append(f"task-{self.task}")
+        
+        if self.session:
+            filename_parts.append(f"ses-{self.session}")
+        
+        # Add denoising strategy
+        if self.denoising_strategy and self.denoising_strategy != "none":
+            filename_parts.append(f"denoise-{self.denoising_strategy}")
+        
+        # Add atlas
+        if hasattr(self.config, 'atlas') and self.config.atlas:
+            filename_parts.append(f"atlas-{self.config.atlas}")
+        
+        # Add description
+        if desc:
+            filename_parts.append(f"desc-{desc}")
+        
+        # Add figure type as suffix
+        base_filename = "_".join(filename_parts)
+        return f"{base_filename}_{figure_type}.png"
     
     def _figure_to_base64(self, fig: plt.Figure, dpi: int = 150) -> str:
         """Convert matplotlib figure to base64 string."""
@@ -2525,8 +2639,20 @@ class GroupReportGenerator:
         buf.seek(0)
         return base64.b64encode(buf.read()).decode('utf-8')
     
-    def _save_figure_to_disk(self, fig: plt.Figure, filename: str, dpi: int = 150) -> Path:
-        """Save figure to disk."""
+    def _save_figure_to_disk(self, fig: plt.Figure, figure_type: str, desc: str, dpi: int = 150) -> Path:
+        """Save figure to disk with BIDS-compliant filename.
+        
+        Args:
+            fig: Matplotlib figure to save
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description entity (e.g., 'mean', 'deviations')
+            dpi: Resolution for saving
+            
+        Returns:
+            Path to saved figure
+        """
+        # Build BIDS-compliant filename
+        filename = self._build_bids_figure_filename(figure_type, desc)
         filepath = self.figures_dir / filename
         fig.savefig(filepath, format='png', dpi=dpi, bbox_inches='tight',
                    facecolor='white', edgecolor='none')
@@ -2738,14 +2864,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "group_mean_connectivity.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'connectivity', 'mean', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'group_mean_connectivity.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">
                         ⬇️ Download
                     </button>
                 </div>
@@ -2777,14 +2904,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "tangent_deviations.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'deviation', 'tangent', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'tangent_deviations.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">​
                         ⬇️ Download
                     </button>
                 </div>
@@ -2800,14 +2928,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "deviation_histogram.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'histogram', 'deviation', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'deviation_histogram.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">
                         ⬇️ Download
                     </button>
                 </div>
@@ -2823,14 +2952,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "inter_subject_variance.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'variance', 'inter-subject', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'inter_subject_variance.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">
                         ⬇️ Download
                     </button>
                 </div>

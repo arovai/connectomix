@@ -647,6 +647,7 @@ def _generate_participant_report(
             condition=condition,
             censoring=censoring,
             resampling_info=resampling_info,
+            denoising_strategy=file_entities.get('denoise'),
         )
         
         # Add denoising histogram data if available
