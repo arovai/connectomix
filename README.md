@@ -75,19 +75,14 @@ Connectomix (via nilearn) searches for atlas data in this order:
 
 1. `$NILEARN_DATA` environment variable (if set)
 2. `~/nilearn_data` (nilearn default cache)
-3. `~/.cache/nilearn_data` (alternative cache location)
 
 #### Manual Setup Steps
 
 ##### 1. Create the Cache Directory
 
 ```bash
-# Using nilearn's default location
+# Create the nilearn data directory (default location)
 mkdir -p ~/nilearn_data
-
-# OR use an alternative location and set the environment variable
-mkdir -p ~/.cache/nilearn_data
-export NILEARN_DATA=~/.cache/nilearn_data
 ```
 
 ##### 2. Download Schaefer 2018 Atlas
