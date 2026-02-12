@@ -12,7 +12,7 @@ by fmridenoiser. Connectomix focuses on:
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 from pathlib import Path
 
 
@@ -85,6 +85,7 @@ class ParticipantConfig:
         denoised_derivatives: Path to denoised derivatives (fmridenoiser output)
         method: Analysis method (seedToVoxel, roiToVoxel, seedToSeed, roiToRoi)
         seeds_file: Path to TSV file with seed coordinates (for seed methods)
+        seeds: List of seed definitions as dicts with 'name', 'x', 'y', 'z' keys
         radius: Sphere radius in mm (for seed methods)
         roi_masks: List of paths to ROI mask files (for roiToVoxel)
         atlas: Atlas name or "canica" (for roiToRoi)
@@ -113,6 +114,7 @@ class ParticipantConfig:
     
     # Method-specific parameters - Seed-based
     seeds_file: Optional[Path] = None
+    seeds: Optional[List[Dict[str, Any]]] = None
     radius: float = 5.0
     
     # Method-specific parameters - ROI-based
@@ -158,10 +160,33 @@ class ParticipantConfig:
         
         # Validate method-specific requirements
         if self.method in ["seedToVoxel", "seedToSeed"]:
-            if self.seeds_file is None:
+            if self.seeds_file is None and self.seeds is None:
                 validator.errors.append(
-                    f"seeds_file is required for method '{self.method}'"
+                    f"Either 'seeds_file' or 'seeds' is required for method '{self.method}'"
                 )
+            if self.seeds_file is not None and not Path(self.seeds_file).exists():
+                validator.errors.append(
+                    f"seeds_file does not exist: {self.seeds_file}"
+                )
+            if self.seeds is not None:
+                # Validate seed structure
+                if not isinstance(self.seeds, list) or len(self.seeds) == 0:
+                    validator.errors.append(
+                        f"seeds must be a non-empty list of dicts with 'name', 'x', 'y', 'z' keys"
+                    )
+                else:
+                    for i, seed in enumerate(self.seeds):
+                        if not isinstance(seed, dict):
+                            validator.errors.append(
+                                f"seeds[{i}] must be a dict, got {type(seed).__name__}"
+                            )
+                        else:
+                            required_keys = {'name', 'x', 'y', 'z'}
+                            missing_keys = required_keys - set(seed.keys())
+                            if missing_keys:
+                                validator.errors.append(
+                                    f"seeds[{i}] missing required keys: {sorted(missing_keys)}"
+                                )
         
         if self.method == "roiToVoxel":
             if self.roi_masks is None or len(self.roi_masks) == 0:

@@ -395,6 +395,8 @@ Connectomix supports four connectivity analysis methods:
 
 Compute correlation between user-defined seed regions and all brain voxels.
 
+**Option A: Seeds from TSV file**
+
 ```yaml
 method: "seedToVoxel"
 seeds_file: "seeds.tsv"  # Tab-separated: name, x, y, z
@@ -407,6 +409,26 @@ name	x	y	z
 PCC	0	-52	18
 mPFC	0	52	0
 LIPL	-45	-70	35
+```
+
+**Option B: Seeds defined in configuration**
+
+```yaml
+method: "seedToVoxel"
+seeds:
+  - name: "PCC"
+    x: 0
+    y: -52
+    z: 18
+  - name: "mPFC"
+    x: 0
+    y: 52
+    z: 0
+  - name: "LIPL"
+    x: -45
+    y: -70
+    z: 35
+radius: 5.0  # Sphere radius in mm
 ```
 
 **Output:** One NIfTI per seed with correlation values at each voxel.
@@ -426,9 +448,27 @@ roi_masks: ["/path/to/roi1.nii.gz", "/path/to/roi2.nii.gz"]
 
 Compute correlation matrix between multiple seeds.
 
+**Option A: Seeds from TSV file**
+
 ```yaml
 method: "seedToSeed"
 seeds_file: "seeds.tsv"
+radius: 5.0
+```
+
+**Option B: Seeds defined in configuration**
+
+```yaml
+method: "seedToSeed"
+seeds:
+  - name: "PCC"
+    x: 0
+    y: -52
+    z: 18
+  - name: "mPFC"
+    x: 0
+    y: 52
+    z: 0
 radius: 5.0
 ```
 

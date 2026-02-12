@@ -1,0 +1,112 @@
+# Connectomix Configuration: Seeds Options Comparison
+# 
+# This file demonstrates the TWO ways to specify seeds for
+# seedToVoxel and seedToSeed analyses:
+# 1. OPTION A: External TSV file
+# 2. OPTION B: Inline seeds in configuration
+#
+# Choose whichever approach best fits your workflow!
+
+# ============================================================================
+# OPTION A: Load seeds from external TSV file
+# ============================================================================
+#
+# Use this approach when:
+# - You have a pre-existing seeds.tsv file
+# - You want to keep seeds in a separate file for version control
+# - You're sharing the same seed list across multiple analyses
+#
+# Example configuration:
+
+# method: "seedToVoxel"
+# seeds_file: "/path/to/seeds.tsv"     # Path to external TSV file
+# radius: 5.0
+
+# Expected seeds.tsv format (tab-separated):
+#   name    x    y    z
+#   PCC     0   -52   18
+#   mPFC    0    52    0
+#   LIPL   -45  -70   35
+
+
+# ============================================================================
+# OPTION B: Define seeds inline in configuration
+# ============================================================================
+#
+# Use this approach when:
+# - You want a self-contained, reproducible configuration file
+# - You have a small number of seeds (5-20)
+# - You don't want to maintain separate seed files
+# - You want all analysis parameters in one place
+#
+# Example configuration:
+
+method: "seedToVoxel"
+
+seeds:
+  - name: "PCC"
+    x: 0
+    y: -52
+    z: 18
+  
+  - name: "mPFC"
+    x: 0
+    y: 52
+    z: 0
+  
+  - name: "LIPL"
+    x: -45
+    y: -70
+    z: 35
+
+radius: 5.0
+
+
+# ============================================================================
+# IMPORTANT NOTES
+# ============================================================================
+#
+# 1. You MUST provide EITHER seeds_file OR seeds, not both
+#    - If both are present, seed_file takes precedence
+#    - If neither is present, analysis will fail with error message
+#
+# 2. Inline seeds require these keys:
+#    - name: string identifier for the seed
+#    - x, y, z: MNI coordinates in millimeters (numeric values)
+#
+# 3. All coordinate values must be convertible to float
+#    - Integers and floats are both accepted
+#    - Quoted numbers like "0" will be converted automatically
+#
+# 4. Seed names are used in output filenames
+#    - Use simple names without special characters (e.g., use "PCC" not "PCC/DMN")
+#    - Names appear in resulting connectivity maps and reports
+#
+# 5. Order matters for seed-to-seed matrices
+#    - Seeds are processed in the order listed
+#    - Output correlation matrix rows/columns follow this order
+
+
+# ============================================================================
+# OTHER PARAMETERS
+# ============================================================================
+
+# BIDS Entity Filters
+subject: ["01"]
+tasks: ["rest"]
+sessions: null
+runs: null
+spaces: ["MNI152NLin2009cAsym"]
+
+# Denoised Data
+denoised_derivatives: null
+
+# Output
+label: null
+
+# Connectivity Computation
+connectivity_kind: "correlation"
+
+# Temporal Censoring (optional)
+condition_masking:
+  enabled: false

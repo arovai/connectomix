@@ -19,7 +19,7 @@ from connectomix.config.defaults import ParticipantConfig
 from connectomix.config.loader import save_config
 from connectomix.io.bids import create_bids_layout, build_bids_path, query_participant_files
 from connectomix.io.paths import create_dataset_description
-from connectomix.io.readers import load_seeds_file, get_repetition_time
+from connectomix.io.readers import load_seeds_file, parse_inline_seeds, get_repetition_time
 from connectomix.preprocessing.resampling import (
     check_geometric_consistency,
     resample_to_reference,
@@ -229,13 +229,18 @@ def run_participant_pipeline(
         seeds_names = None
         
         if config.method in ["seedToVoxel", "seedToSeed"]:
-            if config.seeds_file is None:
+            if config.seeds_file is not None:
+                # Load seeds from file
+                seeds_names, seeds_coords = load_seeds_file(config.seeds_file)
+                logger.info(f"Loaded {len(seeds_names)} seed(s) from {config.seeds_file}")
+            elif config.seeds is not None:
+                # Parse inline seeds from configuration
+                seeds_names, seeds_coords = parse_inline_seeds(config.seeds)
+                logger.info(f"Loaded {len(seeds_names)} seed(s) from configuration")
+            else:
                 raise ConnectomixError(
-                    f"seeds_file is required for method '{config.method}'"
+                    f"Either 'seeds_file' or 'seeds' is required for method '{config.method}'"
                 )
-            
-            seeds_names, seeds_coords = load_seeds_file(config.seeds_file)
-            logger.info(f"Loaded {len(seeds_names)} seed(s) from {config.seeds_file}")
         
         # === Step 6: Process each functional file ===
         log_section(logger, "Processing")

@@ -4,8 +4,9 @@ from pathlib import Path
 from typing import List, Optional
 import logging
 import numpy as np
+import pandas as pd
 import nibabel as nib
-from nilearn import glm
+from nilearn.glm.first_level import FirstLevelModel
 
 from connectomix.connectivity.extraction import extract_single_region_timeseries
 from connectomix.io.writers import save_nifti_with_sidecar
@@ -55,16 +56,16 @@ def compute_roi_to_voxel(
         
         # Create design matrix with ROI time series as regressor
         n_scans = len(roi_timeseries)
-        design_matrix = np.column_stack([
-            roi_timeseries,
-            np.ones(n_scans)  # Intercept
-        ])
+        design_matrix = pd.DataFrame(
+            np.column_stack([roi_timeseries, np.ones(n_scans)]),
+            columns=['roi', 'intercept']
+        )
         
         # Fit GLM
         if logger:
             logger.debug("  Fitting GLM...")
         
-        glm_model = glm.FirstLevelModel(
+        glm_model = FirstLevelModel(
             t_r=t_r,
             high_pass=None,  # Already filtered
             smoothing_fwhm=None,  # No additional smoothing
@@ -78,8 +79,7 @@ def compute_roi_to_voxel(
         if logger:
             logger.debug("  Computing effect size contrast...")
         
-        contrast = np.zeros(design_matrix.shape[1])
-        contrast[0] = 1  # Effect of ROI regressor
+        contrast = np.array([1, 0])  # Effect of ROI regressor, not intercept
         
         effect_size_map = glm_model.compute_contrast(
             contrast,

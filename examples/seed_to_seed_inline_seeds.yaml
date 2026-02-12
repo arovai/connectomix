@@ -1,0 +1,98 @@
+# Connectomix Configuration: Seed-to-Seed with Inline Seeds
+# 
+# This configuration demonstrates seed-to-seed connectivity analysis
+# with seeds defined directly in the configuration file (no separate TSV needed).
+#
+# Usage:
+#   connectomix /path/to/bids /path/to/output participant --config seed_to_seed_inline_seeds.yaml
+
+# BIDS Entity Filters
+# ==================
+# Filter which data to process from your BIDS dataset
+
+subject: ["01"]                    # Subject IDs (without "sub-" prefix)
+tasks: ["rest"]                    # Task names
+sessions: null                     # Session IDs (null = all sessions)
+runs: null                         # Run numbers (null = all runs)
+spaces: ["MNI152NLin2009cAsym"]   # MNI spaces to use
+
+# Analysis Method
+# ===============
+method: "seedToSeed"
+
+# Seeds Configuration
+# ===================
+# OPTION: Define seeds directly in config (inline seeds)
+# Each seed requires: name, x, y, z (MNI coordinates in mm)
+seeds:
+  - name: "PCC"                   # Posterior Cingulate Cortex / Default Mode Network
+    x: 0
+    y: -52
+    z: 18
+  
+  - name: "mPFC"                  # Medial Prefrontal Cortex / Default Mode Network
+    x: 0
+    y: 52
+    z: 0
+  
+  - name: "LIPL"                  # Left Inferior Parietal Lobule / Default Mode Network
+    x: -45
+    y: -70
+    z: 35
+  
+  - name: "RIPL"                  # Right Inferior Parietal Lobule / Default Mode Network
+    x: 45
+    y: -70
+    z: 35
+  
+  - name: "LfMI"                  # Left Frontal Eye Field / Dorsal Attention Network
+    x: -28
+    y: -5
+    z: 52
+  
+  - name: "RfMI"                  # Right Frontal Eye Field / Dorsal Attention Network
+    x: 28
+    y: -5
+    z: 52
+  
+  - name: "LTPJ"                  # Left Temporoparietal Junction / Salience Network
+    x: -52
+    y: -55
+    z: 15
+  
+  - name: "RTPJ"                  # Right Temporoparietal Junction / Salience Network
+    x: 52
+    y: -55
+    z: 15
+
+# Seed Parameters
+radius: 5.0                        # Sphere radius in mm (default: 5.0)
+
+# Denoised Data Location
+# ======================
+denoised_derivatives: null         # Path to denoised data (if not using --derivatives flag)
+
+# Output Options
+# ==============
+label: null                        # Custom label for output filenames (optional)
+
+# Connectivity Computation
+# ========================
+connectivity_kind: "correlation"   # Type of connectivity measure ("correlation", "covariance", etc.)
+
+# Temporal Censoring (Optional)
+# =============================
+# Uncomment to enable condition-based analysis or motion censoring
+condition_masking:
+  enabled: false
+  # events_file: "auto"           # Auto-detect from BIDS, or provide explicit path
+  # conditions: ["rest"]           # Condition names to include (empty = all)
+  # transition_buffer: 0.0         # Seconds to exclude around boundaries
+  # min_volumes_retained: 50       # Minimum volumes required
+  # min_fraction_retained: 0.3     # Minimum fraction of volumes
+
+# Advanced Options (Usually not needed)
+# ======================================
+# n_components: 20                 # For CanICA (not used in seedToSeed)
+# canica_threshold: 1.0            # For CanICA (not used in seedToSeed)
+# canica_min_region_size: 50       # For CanICA (not used in seedToSeed)
