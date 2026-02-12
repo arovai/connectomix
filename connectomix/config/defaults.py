@@ -49,19 +49,23 @@ class ConditionMaskingConfig:
 
 @dataclass
 class TemporalCensoringConfig:
-    """Configuration for temporal censoring (deprecated in connectomix).
+    """Configuration for temporal censoring.
     
-    Temporal censoring (motion-based scrubbing) is now handled upstream by
-    fmridenoiser. This class is kept for backward compatibility and to enable
-    condition-based timepoint selection via the condition_masking config.
+    Motion censoring (FD-based scrubbing) is handled upstream by fmridenoiser.
+    This configuration enables condition-based timepoint selection for task fMRI
+    and drop of initial dummy volumes.
     
     Attributes:
-        enabled: Whether temporal censoring is enabled (usually False).
+        enabled: Whether temporal censoring is enabled (default: False).
+        drop_initial_volumes: Number of dummy scans to drop (default: 0).
+        condition_selection: Dict with condition selection config (default: disabled).
+        custom_mask_file: Optional path to custom censoring mask file.
+        min_volumes_retained: Minimum volumes to retain (default: 50).
     """
     enabled: bool = False
     drop_initial_volumes: int = 0
-    motion_censoring: Dict = field(default_factory=lambda: {"enabled": False})
     condition_selection: Dict = field(default_factory=lambda: {"enabled": False})
+    custom_mask_file: Optional[Path] = None
     min_volumes_retained: int = 50
 
 

@@ -250,14 +250,13 @@ class TemporalCensor:
         """
         n_kept = np.sum(self.mask)
         n_censored = self.n_volumes - n_kept
-        pct_kept = 100.0 * n_kept / self.n_volumes if self.n_volumes > 0 else 0.0
+        fraction_kept = n_kept / self.n_volumes if self.n_volumes > 0 else 0.0
         
         return {
-            'n_volumes_original': self.n_volumes,
-            'n_volumes_kept': int(n_kept),
-            'n_volumes_censored': int(n_censored),
-            'percent_kept': float(pct_kept),
-            'percent_censored': 100.0 - float(pct_kept),
-            'duration_kept_sec': float(n_kept * self.tr),
+            'n_original': self.n_volumes,
+            'n_retained': int(n_kept),
+            'n_censored': int(n_censored),
+            'fraction_retained': float(fraction_kept),
+            'duration_retained_sec': float(n_kept * self.tr),
             'duration_censored_sec': float(n_censored * self.tr),
         }
