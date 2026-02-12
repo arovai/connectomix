@@ -38,6 +38,7 @@ import pandas as pd
 import seaborn as sns
 
 from connectomix.core.version import __version__
+from connectomix.utils.visualization import plot_lightbox_axial_slices
 
 logger = logging.getLogger(__name__)
 
@@ -825,9 +826,17 @@ class ParticipantReportGenerator:
         # Connectivity results
         self.connectivity_matrices: List[Tuple[np.ndarray, List[str], str]] = []
         
+        # Brain maps (for seedToVoxel and roiToVoxel analyses)
+        self.brain_maps: List[Tuple[Path, str, Optional[np.ndarray]]] = []  # (path, label, seed_coords)
+        
         # Add connectivity matrix if provided
         if connectivity_matrix is not None and roi_names is not None:
-            atlas_name = config.atlas if hasattr(config, 'atlas') and config.atlas else "connectivity"
+            # Only use atlas name if method uses an atlas; otherwise use method name
+            method = getattr(config, 'method', None)
+            if method in ('seedToVoxel', 'seedToSeed'):
+                atlas_name = method
+            else:
+                atlas_name = config.atlas if hasattr(config, 'atlas') and config.atlas else "connectivity"
             self.add_connectivity_matrix(connectivity_matrix, roi_names, atlas_name)
         
         # Command/config info
@@ -846,6 +855,17 @@ class ParticipantReportGenerator:
         """Get unique figure ID."""
         self._figure_counter += 1
         return f"fig_{self._figure_counter}"
+    
+    def _method_uses_atlas(self) -> bool:
+        """Check if the current analysis method uses an atlas.
+        
+        Returns:
+            True if the method uses an atlas, False otherwise
+        """
+        method = getattr(self.config, 'method', None)
+        # Methods that do NOT use an atlas
+        non_atlas_methods = ['seedToVoxel', 'seedToSeed']
+        return method not in non_atlas_methods
     
     def _figure_to_base64(self, fig: plt.Figure, dpi: int = 150) -> str:
         """Convert matplotlib figure to base64 PNG."""
@@ -902,8 +922,8 @@ class ParticipantReportGenerator:
         if hasattr(self.config, 'method') and self.config.method:
             filename_parts.append(f"method-{self.config.method}")
         
-        # Add atlas
-        if hasattr(self.config, 'atlas') and self.config.atlas:
+        # Add atlas (only if method uses an atlas)
+        if self._method_uses_atlas() and hasattr(self.config, 'atlas') and self.config.atlas:
             filename_parts.append(f"atlas-{self.config.atlas}")
         
         # Add description
@@ -1073,6 +1093,21 @@ class ParticipantReportGenerator:
         """
         self.denoising_histogram_data = histogram_data
     
+    def add_brain_map(
+        self,
+        brain_map_path: Union[str, Path],
+        label: str,
+        seed_coords: Optional[np.ndarray] = None
+    ) -> None:
+        """Add a brain map for visualization (seedToVoxel or roiToVoxel output).
+        
+        Args:
+            brain_map_path: Path to NIfTI brain map file (.nii or .nii.gz)
+            label: Label for the brain map (e.g., seed name, ROI name)
+            seed_coords: Optional seed coordinates [x, y, z] in mm for centered views
+        """
+        self.brain_maps.append((Path(brain_map_path), label, seed_coords))
+    
     def _build_header(self) -> str:
         """Build report header section."""
         # subject_id may already include full BIDS label like 'sub-01_ses-1_task-rest'
@@ -1146,11 +1181,15 @@ class ParticipantReportGenerator:
         method_desc = method_descriptions.get(self.config.method, self.config.method)
         
         # Determine atlas display value for overview
-        atlas_overview = getattr(self.config, 'atlas', 'N/A')
-        if atlas_overview and atlas_overview != 'N/A':
-            standard_atlases = ['schaefer2018n100', 'schaefer2018n200', 'aal', 'harvardoxford', 'canica']
-            if atlas_overview.lower() not in [a.lower() for a in standard_atlases]:
-                atlas_overview = f"{atlas_overview} (custom)"
+        # Only display atlas if the method uses an atlas
+        if self._method_uses_atlas():
+            atlas_overview = getattr(self.config, 'atlas', 'N/A')
+            if atlas_overview and atlas_overview != 'N/A':
+                standard_atlases = ['schaefer2018n100', 'schaefer2018n200', 'aal', 'harvardoxford', 'canica']
+                if atlas_overview.lower() not in [a.lower() for a in standard_atlases]:
+                    atlas_overview = f"{atlas_overview} (custom)"
+        else:
+            atlas_overview = 'N/A'
         
         html = f'''
         <div class="section" id="overview">
@@ -1161,10 +1200,7 @@ class ParticipantReportGenerator:
                     <div class="metric-value">{self.config.method}</div>
                     <div class="metric-label">Analysis Method</div>
                 </div>
-                <div class="metric-card">
-                    <div class="metric-value">{atlas_overview}</div>
-                    <div class="metric-label">Atlas</div>
-                </div>
+                {f'<div class="metric-card"><div class="metric-value">{atlas_overview}</div><div class="metric-label">Atlas</div></div>' if self._method_uses_atlas() else ''}
             </div>
             
             <h3>Method Description</h3>
@@ -2183,6 +2219,133 @@ class ParticipantReportGenerator:
             return None
     
 
+    def _build_brain_maps_section(self) -> str:
+        """Build brain maps visualization section for seedToVoxel and roiToVoxel."""
+        if not self.brain_maps:
+            return ""
+        
+        self.toc_items.append(("brain_maps", "Brain Maps"))
+        
+        html = '''
+        <div class="section" id="brain_maps">
+            <h2>🧠 Brain Maps</h2>
+            <p>Axial slices showing voxel-wise connectivity strength for each seed/ROI. 
+            Lighter colors indicate stronger connectivity (in either positive or negative direction).</p>
+        '''
+        
+        for item in self.brain_maps:
+            # Handle both old 2-element tuples and new 3-element tuples for backward compatibility
+            if len(item) == 3:
+                brain_map_path, label, seed_coords = item
+            else:
+                brain_map_path, label = item
+                seed_coords = None
+            
+            try:
+                # Create stat map visualization centered at seed
+                fig = plot_lightbox_axial_slices(
+                    str(brain_map_path),
+                    seed_coords=seed_coords,
+                    title=f"Connectivity Map: {label}",
+                    n_slices=12,
+                    n_cols=3
+                )
+                
+                if fig is not None:
+                    fig_id = self._get_unique_figure_id()
+                    img_data = self._figure_to_base64(fig, dpi=150)
+                    
+                    # Save figure to disk
+                    saved_fig_path = self._save_figure_to_disk(
+                        fig, 'brainmap', f'lightbox-{label.replace(" ", "-")}', dpi=150
+                    )
+                    actual_fig_filename = saved_fig_path.name if saved_fig_path else 'brainmap.png'
+                    
+                    plt.close(fig)
+                    
+                    # Load NIfTI to get statistics
+                    import nibabel as nib
+                    img = nib.load(brain_map_path)
+                    img_data_array = img.get_fdata()
+                    nonzero = img_data_array[img_data_array != 0]
+                    
+                    # Compute statistics
+                    if len(nonzero) > 0:
+                        mean_val = np.mean(nonzero)
+                        std_val = np.std(nonzero)
+                        max_val = np.max(img_data_array)
+                        min_val = np.min(img_data_array)
+                        n_voxels = np.sum(img_data_array != 0)
+                    else:
+                        mean_val = std_val = max_val = min_val = 0
+                        n_voxels = 0
+                    
+                    # Format seed information if available
+                    seed_info_html = ""
+                    if seed_coords is not None:
+                        logger.debug(f"Formatting seed info for {label}: coords={seed_coords}")
+                        seed_coords_str = ", ".join([f"{c:.2f}" for c in seed_coords])
+                        seed_info_html = f'''<div class="metric-card">
+                            <div class="metric-value">{label}</div>
+                            <div class="metric-label">Seed Name</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">[{seed_coords_str}]</div>
+                            <div class="metric-label">Seed Coordinates (mm)</div>
+                        </div>'''
+                        logger.debug(f"Generated seed_info_html: {bool(seed_info_html)}")
+                    
+                    # Build HTML for this brain map
+                    html += f'''
+                    <h3>{label}</h3>
+                    
+                    <div class="metrics-grid">
+                        {seed_info_html}
+                        <div class="metric-card">
+                            <div class="metric-value">{n_voxels:,}</div>
+                            <div class="metric-label">Non-zero Voxels</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">{mean_val:.3f}</div>
+                            <div class="metric-label">Mean Connectivity</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">{std_val:.3f}</div>
+                            <div class="metric-label">Std Connectivity</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">[{min_val:.2f}, {max_val:.2f}]</div>
+                            <div class="metric-label">Range</div>
+                        </div>
+                    </div>
+                    
+                    <div class="figure-container">
+                        <div class="figure-wrapper">
+                            <img id="{fig_id}" src="data:image/png;base64,{img_data}">
+                            <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_fig_filename}')">
+                                ⬇️ Download
+                            </button>
+                        </div>
+                        <div class="figure-caption">
+                            Figure: Orthogonal view showing connectivity strength for {label}.
+                            <br><strong>File:</strong> <code>{brain_map_path.name}</code>
+                        </div>
+                    </div>
+                    '''
+                    
+            except Exception as e:
+                logger.warning(f"Failed to create brain map visualization for {label}: {e}")
+                html += f'''
+                <h3>{label}</h3>
+                <div class="info-box">
+                    <p>Failed to visualize brain map: {str(e)}</p>
+                    <p><strong>File:</strong> <code>{brain_map_path}</code></p>
+                </div>
+                '''
+        
+        html += "</div>"
+        return html
+
     def _build_qa_section(self) -> str:
         """Build quality assurance section."""
         if not self.qa_metrics:
@@ -2377,6 +2540,7 @@ class ParticipantReportGenerator:
         sections_html += self._build_confounds_section()
         sections_html += self._build_censoring_section()
         sections_html += self._build_connectivity_section()
+        sections_html += self._build_brain_maps_section()
         sections_html += self._build_qa_section()
         sections_html += self._build_command_section()
         sections_html += self._build_references_section()

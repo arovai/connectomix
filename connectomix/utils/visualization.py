@@ -487,6 +487,192 @@ def plot_qc_metrics(
     return fig
 
 
+def _compute_color_scale(
+    img_data: np.ndarray,
+    threshold: float = 0.0,
+    scale_factor: float = 1.2,
+) -> Tuple[float, float]:
+    """Compute symmetric color scale (vmin/vmax) for statistical maps.
+    
+    Implements robust, threshold-aware color scaling:
+    1. Extract valid (non-NaN) data
+    2. Apply threshold filtering (|value| ≥ threshold)
+    3. Compute 99th/1st percentile bounds
+    4. Apply 1.2× scaling factor for visual enhancement
+    5. Establish symmetry around zero
+    6. Ensure minimum range of ±1.0
+    
+    Args:
+        img_data: 3D array of statistical values
+        threshold: Display threshold (default: 0.0)
+        scale_factor: Multiplier for visual enhancement (default: 1.2)
+    
+    Returns:
+        Tuple of (vmin, vmax) for symmetric color scaling around zero
+    """
+    # Extract valid (non-NaN) values
+    valid_data = img_data[~np.isnan(img_data)]
+    
+    if len(valid_data) == 0:
+        return -1.0, 1.0
+    
+    # Apply threshold filtering
+    if threshold > 0:
+        above_threshold = valid_data[np.abs(valid_data) >= threshold]
+        if len(above_threshold) > 0:
+            valid_data = above_threshold
+        # If no values above threshold, use all valid data
+    
+    # Separate positive and negative values
+    positive_vals = valid_data[valid_data > 0]
+    negative_vals = valid_data[valid_data < 0]
+    
+    # Compute percentile bounds
+    pos_max = np.percentile(positive_vals, 99) if len(positive_vals) > 0 else 0
+    neg_min = np.percentile(negative_vals, 1) if len(negative_vals) > 0 else 0
+    
+    # Apply scaling factor
+    pos_max *= scale_factor
+    neg_min *= scale_factor
+    
+    # Establish symmetry: use maximum absolute value for both
+    abs_max = max(np.abs(pos_max), np.abs(neg_min))
+    
+    # Ensure minimum range
+    if abs_max < 0.1:
+        abs_max = 1.0
+    
+    return -abs_max, abs_max
+
+
+def _fig_to_base64(fig: plt.Figure, dpi: int = 100) -> str:
+    """Convert matplotlib figure to base64 PNG for HTML embedding.
+    
+    Args:
+        fig: Matplotlib figure object
+        dpi: Resolution in dots per inch (default: 100)
+    
+    Returns:
+        Base64 encoded PNG data URI string
+    """
+    import io
+    import base64
+    
+    buffer = io.BytesIO()
+    fig.savefig(buffer, format='png', dpi=dpi, bbox_inches='tight', facecolor='white')
+    buffer.seek(0)
+    image_data = base64.b64encode(buffer.read()).decode()
+    buffer.close()
+    return image_data
+
+
+def plot_lightbox_axial_slices(
+    stat_map,
+    seed_coords: Optional[np.ndarray] = None,
+    output_path: Optional[Path] = None,
+    title: str = "Statistical Map - Axial Slices",
+    n_slices: int = 12,
+    n_cols: int = 3,
+    vmin: Optional[float] = None,
+    vmax: Optional[float] = None,
+) -> plt.Figure:
+    """Plot statistical map in orthogonal view centered at seed location.
+    
+    Creates an orthogonal (3-plane) visualization of a statistical map
+    centered at the specified seed coordinates using nilearn's plot_stat_map.
+    
+    Args:
+        stat_map: Statistical map (path string, Path, or NIfTI image object)
+        seed_coords: Seed coordinates [x, y, z] in mm to center the view. If None, uses image center.
+        output_path: Path to save figure as PNG (optional)
+        title: Figure title (default: "Statistical Map - Axial Slices")
+        n_slices: Number of slices to display (default: 12) - unused with ortho mode
+        n_cols: Number of columns in grid layout (default: 3) - unused with ortho mode
+        vmin: Manual minimum for color scale. If None, computed from data.
+        vmax: Manual maximum for color scale. If None, computed from data.
+    
+    Returns:
+        Matplotlib Figure object
+    
+    Example:
+        >>> fig = plot_lightbox_axial_slices(
+        ...     "path/to/tmap.nii.gz",
+        ...     seed_coords=np.array([0, 0, 0]),
+        ...     title="First-Level T-Map centered at seed"
+        ... )
+    """
+    from nilearn import plotting
+    import nibabel as nib
+    
+    try:
+        # Load image if path
+        if isinstance(stat_map, (str, Path)):
+            stat_map_img = nib.load(stat_map)
+        else:
+            stat_map_img = stat_map
+        
+        stat_data = stat_map_img.get_fdata()
+        
+        if stat_data.ndim != 3:
+            raise ValueError(f"Expected 3D image, got shape {stat_data.shape}")
+        
+        # Compute symmetric color scale if not provided
+        if vmin is None or vmax is None:
+            # Threshold is always 0 (no masking)
+            vmin_computed, vmax_computed = _compute_color_scale(stat_data, threshold=0.0)
+            if vmin is None:
+                vmin = vmin_computed
+            if vmax is None:
+                vmax = vmax_computed
+        
+        # Convert seed_coords to list format expected by nilearn
+        if seed_coords is not None:
+            cut_coords = tuple(seed_coords)
+        else:
+            cut_coords = None
+        
+        # Use nilearn's plot_stat_map with orthogonal display mode
+        # Larger figure size: width for images + colorbar, height for 3 orthogonal slices
+        fig = plt.figure(figsize=(16, 5))
+        
+        display = plotting.plot_stat_map(
+            stat_map_img,
+            threshold=0,  # Always use threshold=0 (no masking)
+            display_mode='ortho',  # 3-plane orthogonal view
+            cut_coords=cut_coords,  # Centered at seed location
+            colorbar=True,
+            cmap='cold_hot',
+            title=title,
+            figure=fig,
+            vmin=vmin,
+            vmax=vmax,
+        )
+        
+        if output_path:
+            output_path = Path(output_path)
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(output_path, dpi=100, bbox_inches='tight', facecolor='white')
+            logger.info(f"Saved stat map orthogonal view plot: {output_path}")
+        
+        return fig
+        
+    except Exception as e:
+        logger.warning(f"Could not create stat map plot: {e}")
+        
+        # Fallback: generate error message figure
+        fig = plt.figure(figsize=(12, 6), dpi=100)
+        ax = fig.add_subplot(111)
+        ax.text(
+            0.5, 0.5,
+            f"Error generating stat map visualization\n\n{str(e)}",
+            ha='center', va='center', fontsize=12, color='red',
+            transform=ax.transAxes,
+        )
+        ax.axis('off')
+        
+        return fig
+
+
 def close_all_figures():
     """Close all matplotlib figures to free memory."""
     plt.close("all")

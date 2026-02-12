@@ -20,11 +20,6 @@ from connectomix.config.loader import save_config
 from connectomix.io.bids import create_bids_layout, build_bids_path, query_participant_files
 from connectomix.io.paths import create_dataset_description
 from connectomix.io.readers import load_seeds_file, parse_inline_seeds, get_repetition_time
-from connectomix.preprocessing.resampling import (
-    check_geometric_consistency,
-    resample_to_reference,
-    save_geometry_info,
-)
 from connectomix.preprocessing.canica import run_canica_atlas
 from connectomix.preprocessing.censoring import (
     TemporalCensor,
@@ -53,12 +48,13 @@ def run_participant_pipeline(
     
     This function orchestrates:
     1. BIDS layout creation and file discovery
-    2. Geometric consistency checking (across ALL subjects)
-    3. Resampling if needed
-    4. Denoising (confound regression + temporal filtering)
-    5. CanICA atlas generation (if method=roiToRoi and atlas=canica)
-    6. Connectivity computation (one of four methods)
-    7. Output saving with BIDS-compliant names and JSON sidecars
+    2. Temporal censoring (if enabled)
+    3. CanICA atlas generation (if method=roiToRoi and atlas=canica)
+    4. Connectivity computation (one of four methods)
+    5. Output saving with BIDS-compliant names and JSON sidecars
+    
+    Note: Geometric consistency checking and resampling are now handled
+    by the upstream denoising tool (fmridenoiser), not by connectomix.
     
     Args:
         bids_dir: Path to BIDS dataset root.
@@ -72,7 +68,6 @@ def run_participant_pipeline(
         Dictionary with keys mapping to lists of output file paths:
             - 'connectivity': List of connectivity output files
             - 'denoised': List of denoised functional images
-            - 'resampled': List of resampled images (if resampling needed)
     
     Raises:
         BIDSError: If BIDS dataset or derivatives are invalid.
@@ -101,7 +96,6 @@ def run_participant_pipeline(
     outputs = {
         'connectivity': [],
         'denoised': [],
-        'resampled': [],
     }
     
     with timer(logger, "Participant-level analysis"):
@@ -172,30 +166,10 @@ def run_participant_pipeline(
                 "Please check your BIDS entities and ensure preprocessing outputs exist."
             )
         
-        # === Step 3: Geometric consistency check ===
-        log_section(logger, "Geometric Consistency")
+        # Note: Geometric consistency checking and resampling are now handled
+        # by the upstream denoising tool (fmridenoiser), not by connectomix
         
-        # Get ALL functional files for geometry check (not just selected)
-        all_func_files = _get_all_functional_files(layout, entities, logger)
-        
-        # Use first functional file as reference for consistency checking
-        # (Connectomix no longer performs denoising/resampling, so reference_functional_file config is not needed)
-        reference_path = Path(all_func_files[0])
-        reference_img = nib.load(reference_path)
-        logger.info(f"Using first functional file as reference: {reference_path.name}")
-        
-        # Check consistency across files
-        is_consistent, geometries = check_geometric_consistency(
-            all_func_files, logger, reference_file=reference_path
-        )
-        
-        # Log reference geometry at INFO level if files are inconsistent
-        if not is_consistent:
-            ref_shape = reference_img.shape[:3]
-            ref_voxel = [float(reference_img.header.get_zooms()[i]) for i in range(3)]
-            logger.info(f"Reference geometry: shape={ref_shape}, voxel size={ref_voxel} mm")
-        
-        # === Step 4: Generate CanICA atlas if needed ===
+        # === Step 3: Generate CanICA atlas if needed ===
         atlas_img = None
         atlas_labels = None
         atlas_coords = None
@@ -224,7 +198,7 @@ def run_participant_pipeline(
             # Load standard atlas with coordinates
             atlas_img, atlas_labels, atlas_coords = _load_standard_atlas(config.atlas, logger)
         
-        # === Step 5: Load seeds if needed ===
+        # === Step 4: Load seeds if needed ===
         seeds_coords = None
         seeds_names = None
         
@@ -242,11 +216,12 @@ def run_participant_pipeline(
                     f"Either 'seeds_file' or 'seeds' is required for method '{config.method}'"
                 )
         
-        # === Step 6: Process each functional file ===
+        # === Step 5: Process each functional file ===
         log_section(logger, "Processing")
         
         for i, func_path in enumerate(files['func']):
             func_path = Path(func_path)
+            denoised_func_path = func_path
             
             logger.info(f"Processing file {i+1}/{n_files}: {func_path.name}")
             
@@ -256,62 +231,9 @@ def run_participant_pipeline(
             # Track all connectivity outputs for this file
             connectivity_paths = []
             
-            # Track resampling info for report
-            resampling_info_for_report = None
-            
             with timer(logger, f"  Subject {file_entities.get('sub', 'unknown')}"):
-                # --- Resample if needed ---
-                if not is_consistent:
-                    resampled_path = _get_output_path(
-                        output_dir, file_entities, "resampled", "bold", ".nii.gz",
-                        label=config.label, subfolder="func"
-                    )
-                    
-                    # Load original image before resampling (for geometry tracking)
-                    original_img = nib.load(func_path)
-                    
-                    func_img = resample_to_reference(
-                        func_path,
-                        reference_img,
-                        resampled_path,
-                        logger,
-                    )
-                    outputs['resampled'].append(resampled_path)
-                    
-                    # Build resampling info for report
-                    resampling_info_for_report = {
-                        'resampled': True,
-                        'reference_file': str(reference_path),
-                        'original_shape': list(original_img.shape[:3]),
-                        'original_voxel_size': [float(original_img.header.get_zooms()[i]) for i in range(3)],
-                        'reference_shape': list(reference_img.shape[:3]),
-                        'reference_voxel_size': [float(reference_img.header.get_zooms()[i]) for i in range(3)],
-                        'final_shape': list(func_img.shape[:3]),
-                        'final_voxel_size': [float(func_img.header.get_zooms()[i]) for i in range(3)],
-                    }
-                    
-                    # Save geometry info with full resampling provenance
-                    geometry_path = resampled_path.with_suffix('').with_suffix('.json')
-                    if not geometry_path.exists():
-                        source_json = func_path.with_suffix('').with_suffix('.json')
-                        save_geometry_info(
-                            img=func_img,
-                            output_path=geometry_path,
-                            reference_path=reference_path,
-                            reference_img=reference_img,
-                            original_path=func_path,
-                            original_img=original_img,
-                            source_json=source_json,
-                        )
-                    
-                    # Use resampled path for denoising
-                    input_for_denoise = resampled_path
-                else:
-                    func_img = nib.load(func_path)
-                    denoised_func_path = func_path
-                
-                # Use the already-denoised functional image
-                denoised_img = nib.load(denoised_func_path)
+                # Load the already-processed functional image from denoising tool
+                denoised_img = nib.load(func_path)
                 
                 # Denoising histogram data is not needed since input is already denoised
                 denoising_histogram_data = None
@@ -379,6 +301,7 @@ def run_participant_pipeline(
                             atlas_labels=atlas_labels,
                             atlas_coords=atlas_coords,
                             logger=logger,
+                            denoised_func_path=denoised_func_path,
                         )
                         outputs['connectivity'].extend(connectivity_paths_cond)
                         connectivity_paths.extend(connectivity_paths_cond)
@@ -406,6 +329,7 @@ def run_participant_pipeline(
                         atlas_labels=atlas_labels,
                         atlas_coords=atlas_coords,
                         logger=logger,
+                        denoised_func_path=denoised_func_path,
                     )
                     outputs['connectivity'].extend(connectivity_paths_single)
                     connectivity_paths = connectivity_paths_single
@@ -442,7 +366,8 @@ def run_participant_pipeline(
                     connectivity_matrices=connectivity_matrices_for_report,
                     roi_names=roi_names_for_report,
                     denoising_histogram_data=denoising_histogram_data,
-                    resampling_info=resampling_info_for_report,
+                    seeds_names=seeds_names,
+                    seeds_coords=seeds_coords,
                 )
         
         # === Summary ===
@@ -541,7 +466,8 @@ def _generate_participant_report(
     connectivity_matrices: Optional[Dict[str, np.ndarray]] = None,
     roi_names: Optional[List[str]] = None,
     denoising_histogram_data: Optional[Dict] = None,
-    resampling_info: Optional[Dict] = None,
+    seeds_names: Optional[List[str]] = None,
+    seeds_coords: Optional[np.ndarray] = None,
 ) -> Optional[Path]:
     """Generate HTML report for a participant analysis.
     
@@ -571,8 +497,10 @@ def _generate_participant_report(
         List of ROI names for connectivity matrices.
     denoising_histogram_data : dict or None
         Denoising histogram data (not used since connectomix consumes denoised data).
-    resampling_info : dict or None
-        Information about resampling performed (reference, original geometry, etc.).
+    seeds_names : list or None
+        List of seed names (for seedToVoxel/seedToSeed methods).
+    seeds_coords : ndarray or None
+        Seed coordinates array, shape (n_seeds, 3) in mm (for seedToVoxel/seedToSeed methods).
     
     Returns
     -------
@@ -658,7 +586,6 @@ def _generate_participant_report(
             censoring_summary=censoring_summary,
             condition=condition,
             censoring=censoring,
-            resampling_info=resampling_info,
             denoising_strategy=file_entities.get('denoise'),
         )
         
@@ -677,6 +604,69 @@ def _generate_participant_report(
                 if kind == 'correlation':
                     continue
                 report.add_connectivity_matrix(matrix, roi_names, f"{config.atlas}_{kind}")
+        
+        # Add brain maps for seedToVoxel and roiToVoxel methods
+        if config.method in ["seedToVoxel", "roiToVoxel"]:
+            # Find NIfTI files (brain maps) in connectivity_paths
+            nifti_files = [p for p in connectivity_paths if p.suffix in ['.gz', '.nii']]
+            
+            logger.debug(f"Found {len(nifti_files)} NIfTI files for {config.method}")
+            
+            # Load seeds or ROIs to get labels and coordinates for each brain map
+            labels = []
+            seed_coords_list = []
+            seed_name_to_coords = {}  # Map seed name to coordinates
+            
+            if config.method == "seedToVoxel" and seeds_names is not None and seeds_coords is not None:
+                # Use the seeds that were already loaded earlier in this function
+                logger.debug(f"Using {len(seeds_names)} seeds already loaded for seedToVoxel")
+                seed_name_to_coords = {name: list(coord) for name, coord in zip(seeds_names, seeds_coords)}
+                logger.debug(f"Seeds available: {list(seed_name_to_coords.keys())}")
+            elif config.method == "roiToVoxel" and config.roi_masks:
+                logger.debug(f"Using ROI masks for roiToVoxel")
+            else:
+                logger.debug(f"No seeds/ROIs available - will use file names as labels")
+            
+            # Extract seed name from each brain map filename and match to coordinates
+            for nifti_file in nifti_files:
+                filename = nifti_file.name
+                logger.debug(f"Processing brain map: {filename}")
+                
+                # Try to extract seed name from filename (look for 'seed-SEEDNAME' pattern)
+                if config.method == "seedToVoxel":
+                    # Extract seed name from filename like "seed-PCC_desc-..."
+                    import re
+                    seed_match = re.search(r'seed-([^_]+)', filename)
+                    if seed_match:
+                        seed_name = seed_match.group(1)
+                        logger.debug(f"  Extracted seed name: {seed_name}")
+                        label = seed_name
+                        seed_coords = seed_name_to_coords.get(seed_name)
+                        logger.debug(f"  Coordinates for {seed_name}: {seed_coords}")
+                    else:
+                        logger.warning(f"  Could not extract seed name from filename: {filename}")
+                        label = nifti_file.stem
+                        seed_coords = None
+                elif config.method == "roiToVoxel" and config.roi_masks:
+                    # For roiToVoxel, use ROI mask names
+                    label = Path(config.roi_masks[0]).stem if config.roi_masks else nifti_file.stem
+                    seed_coords = None
+                else:
+                    # Fallback: use filename
+                    label = nifti_file.stem
+                    seed_coords = None
+                
+                labels.append(label)
+                seed_coords_list.append(seed_coords)
+            
+            # Add each brain map to the report
+            for nifti_file, label, seed_coords in zip(nifti_files, labels, seed_coords_list):
+                try:
+                    logger.debug(f"Adding brain map: label={label}, seed_coords={seed_coords}")
+                    report.add_brain_map(nifti_file, label, seed_coords)
+                    logger.debug(f"Added brain map to report: {label} ({nifti_file.name})")
+                except Exception as e:
+                    logger.warning(f"Failed to add brain map {nifti_file.name}: {e}")
         
         # Generate report
         report_path = report.generate()
@@ -818,40 +808,6 @@ def _build_entity_filter(config: ParticipantConfig) -> Dict[str, any]:
         entities['space'] = config.spaces[0] if len(config.spaces) == 1 else config.spaces
     
     return entities
-
-
-def _get_all_functional_files(
-    layout,
-    entities: Dict,
-    logger: logging.Logger,
-) -> List[Path]:
-    """Get ALL functional files for geometry check, not just selected ones."""
-    # Try denoised first (from fmridenoiser), then preproc (from fMRIPrep)
-    query = {
-        'extension': 'nii.gz',
-        'suffix': 'bold',
-        'scope': 'derivatives',
-        'invalid_filters': 'allow',
-    }
-    
-    # Keep space filter for consistency
-    if entities.get('space'):
-        query['space'] = entities['space']
-    
-    # Try denoised files first
-    query_denoised = query.copy()
-    query_denoised['desc'] = 'denoised'
-    all_files = layout.get(**query_denoised)
-    
-    # If no denoised files, try preproc
-    if len(all_files) == 0:
-        query_preproc = query.copy()
-        query_preproc['desc'] = 'preproc'
-        all_files = layout.get(**query_preproc)
-    
-    logger.debug(f"Found {len(all_files)} total functional files for geometry check")
-    
-    return [Path(f.path) for f in all_files]
 
 
 def _extract_entities_from_path(path: Path) -> Dict[str, str]:
@@ -1259,6 +1215,7 @@ def _compute_connectivity(
     atlas_labels: Optional[List[str]],
     atlas_coords: Optional[np.ndarray],
     logger: logging.Logger,
+    denoised_func_path: Optional[Path] = None,
 ) -> Tuple[List[Path], Optional[Dict[str, np.ndarray]], Optional[List[str]]]:
     """Compute connectivity using the specified method.
     
@@ -1293,6 +1250,8 @@ def _compute_connectivity(
                 output_path=output_path,
                 logger=logger,
                 radius=config.radius,
+                denoised_func_path=denoised_func_path,
+                file_entities=file_entities,
             )
             output_paths.append(output_path)
     
@@ -1311,10 +1270,12 @@ def _compute_connectivity(
             
             compute_roi_to_voxel(
                 func_img=denoised_img,
-                roi_img=roi_img,
+                roi_mask=roi_img,
                 roi_name=roi_name,
                 output_path=output_path,
                 logger=logger,
+                denoised_func_path=denoised_func_path,
+                file_entities=file_entities,
             )
             output_paths.append(output_path)
     

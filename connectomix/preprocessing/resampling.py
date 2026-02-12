@@ -102,9 +102,7 @@ def check_geometric_consistency(
                 is_consistent = False
                 inconsistent_files.append(func_file.name)
         
-        if is_consistent:
-            _logger.info("✓ All images have consistent geometry - resampling not needed")
-        else:
+        if not is_consistent:
             _logger.warning(
                 f"⚠ Geometry inconsistency detected in {len(inconsistent_files)} file(s) - "
                 f"will resample to reference. Files: {', '.join(inconsistent_files[:5])}"

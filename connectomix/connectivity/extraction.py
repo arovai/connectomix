@@ -39,7 +39,7 @@ def extract_seeds_timeseries(
         masker = maskers.NiftiSpheresMasker(
             seeds=seeds_coords,
             radius=radius,
-            standardize=True,  # Standardize signal
+            standardize='zscore_sample',  # Standardize signal
             detrend=False,     # Already detrended in preprocessing
             low_pass=None,     # Already filtered in preprocessing
             high_pass=None,
@@ -86,7 +86,7 @@ def extract_roi_timeseries(
         # Create labels masker
         masker = maskers.NiftiLabelsMasker(
             labels_img=atlas_img,
-            standardize=True,  # Standardize signal
+            standardize='zscore_sample',  # Standardize signal
             detrend=False,     # Already detrended in preprocessing
             low_pass=None,     # Already filtered in preprocessing
             high_pass=None,
@@ -133,7 +133,7 @@ def extract_single_region_timeseries(
         # Create masker
         masker = maskers.NiftiMasker(
             mask_img=mask_img,
-            standardize=True,  # Standardize signal
+            standardize='zscore_sample',  # Standardize signal
             detrend=False,     # Already detrended in preprocessing
             low_pass=None,     # Already filtered in preprocessing
             high_pass=None,
