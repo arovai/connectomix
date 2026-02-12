@@ -74,8 +74,8 @@ When Connectomix uses standard atlases (Schaefer, AAL, Harvard-Oxford), nilearn 
 Connectomix (via nilearn) searches for atlas data in this order:
 
 1. `$NILEARN_DATA` environment variable (if set)
-2. `~/.cache/nilearn_data` (nilearn default cache)
-3. `~/nilearn_data` (alternative cache location)
+2. `~/nilearn_data` (nilearn default cache)
+3. `~/.cache/nilearn_data` (alternative cache location)
 
 #### Manual Setup Steps
 
@@ -83,11 +83,11 @@ Connectomix (via nilearn) searches for atlas data in this order:
 
 ```bash
 # Using nilearn's default location
-mkdir -p ~/.cache/nilearn_data
+mkdir -p ~/nilearn_data
 
 # OR use an alternative location and set the environment variable
-mkdir -p ~/nilearn_data
-export NILEARN_DATA=~/nilearn_data
+mkdir -p ~/.cache/nilearn_data
+export NILEARN_DATA=~/.cache/nilearn_data
 ```
 
 ##### 2. Download Schaefer 2018 Atlas
@@ -101,10 +101,10 @@ export NILEARN_DATA=~/nilearn_data
 
 ```bash
 # Create Schaefer directory
-mkdir -p ~/.cache/nilearn_data/schaefer_2018
+mkdir -p ~/nilearn_data/schaefer_2018
 
 # Download 100-parcel version
-cd ~/.cache/nilearn_data/schaefer_2018
+cd ~/nilearn_data/schaefer_2018
 
 # Using wget
 wget https://raw.githubusercontent.com/ThomasYeoLab/CBIG/v0.14.3-Update_Yeo2011_Schaefer2018_labelname/stable_projects/brain_parcellation/Schaefer2018_LocalGlobal/Parcellations/MNI/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz
@@ -125,10 +125,10 @@ curl -O https://raw.githubusercontent.com/ThomasYeoLab/CBIG/v0.14.3-Update_Yeo20
 
 ```bash
 # Create AAL directory
-mkdir -p ~/.cache/nilearn_data/aal_SPM12
+mkdir -p ~/nilearn_data/aal_SPM12
 
 # Download and extract
-cd ~/.cache/nilearn_data
+cd ~/nilearn_data
 
 # Using wget
 wget https://www.gin.cnrs.fr/wp-content/uploads/aal_for_SPM12.tar.gz
@@ -151,9 +151,9 @@ Harvard-Oxford is typically distributed as part of FSL. The easiest way is to ex
 
 ```bash
 # Create FSL directory
-mkdir -p ~/.cache/nilearn_data/fsl/data/atlases/HarvardOxford
+mkdir -p ~/nilearn_data/fsl/data/atlases/HarvardOxford
 
-cd ~/.cache/nilearn_data/fsl/data/atlases/HarvardOxford
+cd ~/nilearn_data/fsl/data/atlases/HarvardOxford
 
 # Download Harvard-Oxford cortical atlas (2mm resolution)
 wget https://fsl.fmrib.ox.ac.uk/fsldownloads/fslconda/data/HarvardOxford-cort-maxprob-thr25-2mm.nii.gz
@@ -169,7 +169,7 @@ wget https://fsl.fmrib.ox.ac.uk/fsl/fslwiki/Atlases/HarvardOxford-Cortical.xml -
 
 ```bash
 # Copy from FSL installation
-cp -r $FSLDIR/data/atlases/HarvardOxford ~/.cache/nilearn_data/fsl/data/atlases/
+cp -r $FSLDIR/data/atlases/HarvardOxford ~/nilearn_data/fsl/data/atlases/
 ```
 
 #### Verify the Installation
@@ -201,13 +201,13 @@ Check that files are in the correct location:
 
 ```bash
 # For Schaefer
-ls ~/.cache/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz
+ls ~/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz
 
 # For AAL
-ls ~/.cache/nilearn_data/aal_SPM12/aal/atlas/AAL.nii
+ls ~/nilearn_data/aal_SPM12/aal/atlas/AAL.nii
 
 # For Harvard-Oxford
-ls ~/.cache/nilearn_data/fsl/data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-2mm.nii.gz
+ls ~/nilearn_data/fsl/data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr25-2mm.nii.gz
 ```
 
 **Using a custom cache location:**
@@ -255,17 +255,17 @@ RUN git clone https://github.com/ln2t/connectomix.git && \
     pip install -e .
 
 # Pre-download atlases at build time
-RUN mkdir -p ~/.cache/nilearn_data/schaefer_2018 && \
-    curl -o ~/.cache/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz \
+RUN mkdir -p ~/nilearn_data/schaefer_2018 && \
+    curl -o ~/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz \
     https://raw.githubusercontent.com/ThomasYeoLab/CBIG/v0.14.3-Update_Yeo2011_Schaefer2018_labelname/stable_projects/brain_parcellation/Schaefer2018_LocalGlobal/Parcellations/MNI/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz && \
-    curl -o ~/.cache/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order.txt \
+    curl -o ~/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order.txt \
     https://raw.githubusercontent.com/ThomasYeoLab/CBIG/v0.14.3-Update_Yeo2011_Schaefer2018_labelname/stable_projects/brain_parcellation/Schaefer2018_LocalGlobal/Parcellations/MNI/Schaefer2018_100Parcels_7Networks_order.txt
 ```
 
 Then run the container with the pre-cached data:
 
 ```bash
-docker run -v ~/.cache/nilearn_data:/root/.cache/nilearn_data -v /data:/data myimage \
+docker run -v ~/nilearn_data:/root/nilearn_data -v /data:/data myimage \
   connectomix /data/bids /data/output participant --atlas schaefer2018n100
 ```
 
