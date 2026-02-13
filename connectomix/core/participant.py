@@ -615,6 +615,7 @@ def _generate_participant_report(
             # Load seeds or ROIs to get labels and coordinates for each brain map
             labels = []
             seed_coords_list = []
+            seed_radius_list = []
             seed_name_to_coords = {}  # Map seed name to coordinates
             
             if config.method == "seedToVoxel" and seeds_names is not None and seeds_coords is not None:
@@ -643,27 +644,32 @@ def _generate_participant_report(
                         label = seed_name
                         seed_coords = seed_name_to_coords.get(seed_name)
                         logger.debug(f"  Coordinates for {seed_name}: {seed_coords}")
+                        seed_radius = config.radius  # Get radius from config
                     else:
                         logger.warning(f"  Could not extract seed name from filename: {filename}")
                         label = nifti_file.stem
                         seed_coords = None
+                        seed_radius = None
                 elif config.method == "roiToVoxel" and config.roi_masks:
                     # For roiToVoxel, use ROI mask names
                     label = Path(config.roi_masks[0]).stem if config.roi_masks else nifti_file.stem
                     seed_coords = None
+                    seed_radius = None
                 else:
                     # Fallback: use filename
                     label = nifti_file.stem
                     seed_coords = None
+                    seed_radius = None
                 
                 labels.append(label)
                 seed_coords_list.append(seed_coords)
+                seed_radius_list.append(seed_radius)
             
             # Add each brain map to the report
-            for nifti_file, label, seed_coords in zip(nifti_files, labels, seed_coords_list):
+            for nifti_file, label, seed_coords, seed_radius in zip(nifti_files, labels, seed_coords_list, seed_radius_list):
                 try:
-                    logger.debug(f"Adding brain map: label={label}, seed_coords={seed_coords}")
-                    report.add_brain_map(nifti_file, label, seed_coords)
+                    logger.debug(f"Adding brain map: label={label}, seed_coords={seed_coords}, seed_radius={seed_radius}")
+                    report.add_brain_map(nifti_file, label, seed_coords, seed_radius)
                     logger.debug(f"Added brain map to report: {label} ({nifti_file.name})")
                 except Exception as e:
                     logger.warning(f"Failed to add brain map {nifti_file.name}: {e}")

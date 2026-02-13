@@ -566,9 +566,67 @@ def _fig_to_base64(fig: plt.Figure, dpi: int = 100) -> str:
     return image_data
 
 
+def _create_seed_sphere(
+    reference_img,
+    seed_coords: np.ndarray,
+    radius: float,
+) -> "nib.Nifti1Image":
+    """Create a NIfTI image representing a spherical seed region.
+    
+    Creates a binary 3D image with 1s inside the sphere and 0s outside,
+    in the same space as the reference image.
+    
+    Args:
+        reference_img: Reference NIfTI image defining the space
+        seed_coords: Seed coordinates [x, y, z] in mm (MNI space)
+        radius: Sphere radius in mm
+    
+    Returns:
+        NIfTI image with sphere mask
+    """
+    import nibabel as nib
+    
+    # Get the shape and affine from reference image
+    ref_data = reference_img.get_fdata()
+    ref_affine = reference_img.affine
+    
+    # Create an empty sphere mask
+    sphere_data = np.zeros_like(ref_data)
+    
+    # Get inverse affine to convert MNI coords to voxel indices
+    inv_affine = np.linalg.inv(ref_affine)
+    
+    # Convert seed coordinates from MNI to voxel indices
+    seed_voxel = inv_affine @ np.array([*seed_coords, 1])
+    seed_voxel = seed_voxel[:3]  # Drop homogeneous coordinate
+    
+    # Create distance matrix for all voxels
+    indices = np.indices(ref_data.shape)
+    distances = np.sqrt(
+        (indices[0] - seed_voxel[0])**2 +
+        (indices[1] - seed_voxel[1])**2 +
+        (indices[2] - seed_voxel[2])**2
+    )
+    
+    # Estimate voxel size in mm (using average of diagonal elements)
+    voxel_size = np.mean(np.abs(np.diag(ref_affine[:3, :3])))
+    
+    # Convert radius from mm to voxels
+    radius_voxels = radius / voxel_size
+    
+    # Create binary sphere mask
+    sphere_data[distances <= radius_voxels] = 1.0
+    
+    # Create NIfTI image with same affine as reference
+    sphere_img = nib.Nifti1Image(sphere_data, affine=ref_affine)
+    
+    return sphere_img
+
+
 def plot_lightbox_axial_slices(
     stat_map,
     seed_coords: Optional[np.ndarray] = None,
+    seed_radius: Optional[float] = None,
     output_path: Optional[Path] = None,
     title: str = "Statistical Map - Axial Slices",
     n_slices: int = 12,
@@ -580,10 +638,12 @@ def plot_lightbox_axial_slices(
     
     Creates an orthogonal (3-plane) visualization of a statistical map
     centered at the specified seed coordinates using nilearn's plot_stat_map.
+    Optionally overlays a green sphere representing the seed region.
     
     Args:
         stat_map: Statistical map (path string, Path, or NIfTI image object)
         seed_coords: Seed coordinates [x, y, z] in mm to center the view. If None, uses image center.
+        seed_radius: Seed sphere radius in mm. If provided, overlays green sphere on the plot.
         output_path: Path to save figure as PNG (optional)
         title: Figure title (default: "Statistical Map - Axial Slices")
         n_slices: Number of slices to display (default: 12) - unused with ortho mode
@@ -598,6 +658,7 @@ def plot_lightbox_axial_slices(
         >>> fig = plot_lightbox_axial_slices(
         ...     "path/to/tmap.nii.gz",
         ...     seed_coords=np.array([0, 0, 0]),
+        ...     seed_radius=5.0,
         ...     title="First-Level T-Map centered at seed"
         ... )
     """
@@ -647,6 +708,24 @@ def plot_lightbox_axial_slices(
             vmin=vmin,
             vmax=vmax,
         )
+        
+        # Overlay seed sphere if both coordinates and radius are provided
+        if seed_coords is not None and seed_radius is not None:
+            try:
+                # Create a sphere mask at the seed location
+                seed_sphere_img = _create_seed_sphere(stat_map_img, seed_coords, seed_radius)
+                
+                # Add the sphere overlay with bright green colormap
+                display.add_overlay(
+                    seed_sphere_img,
+                    cmap='Greens',
+                    alpha=0.6,
+                    vmin=0.5,
+                    vmax=1.0,
+                )
+                logger.debug(f"Added seed sphere overlay: coords={seed_coords}, radius={seed_radius}mm")
+            except Exception as sphere_error:
+                logger.warning(f"Could not overlay seed sphere: {sphere_error}")
         
         if output_path:
             output_path = Path(output_path)

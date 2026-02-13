@@ -1097,7 +1097,8 @@ class ParticipantReportGenerator:
         self,
         brain_map_path: Union[str, Path],
         label: str,
-        seed_coords: Optional[np.ndarray] = None
+        seed_coords: Optional[np.ndarray] = None,
+        seed_radius: Optional[float] = None
     ) -> None:
         """Add a brain map for visualization (seedToVoxel or roiToVoxel output).
         
@@ -1105,8 +1106,9 @@ class ParticipantReportGenerator:
             brain_map_path: Path to NIfTI brain map file (.nii or .nii.gz)
             label: Label for the brain map (e.g., seed name, ROI name)
             seed_coords: Optional seed coordinates [x, y, z] in mm for centered views
+            seed_radius: Optional seed sphere radius in mm for visualization overlay
         """
-        self.brain_maps.append((Path(brain_map_path), label, seed_coords))
+        self.brain_maps.append((Path(brain_map_path), label, seed_coords, seed_radius))
     
     def _build_header(self) -> str:
         """Build report header section."""
@@ -2230,22 +2232,28 @@ class ParticipantReportGenerator:
         <div class="section" id="brain_maps">
             <h2>🧠 Brain Maps</h2>
             <p>Axial slices showing voxel-wise connectivity strength for each seed/ROI. 
-            Lighter colors indicate stronger connectivity (in either positive or negative direction).</p>
+            Lighter colors indicate stronger connectivity (in either positive or negative direction).
+            Green sphere overlay indicates the seed region (center and radius).</p>
         '''
         
         for item in self.brain_maps:
-            # Handle both old 2-element tuples and new 3-element tuples for backward compatibility
-            if len(item) == 3:
+            # Handle different tuple formats for backward compatibility
+            if len(item) == 4:
+                brain_map_path, label, seed_coords, seed_radius = item
+            elif len(item) == 3:
                 brain_map_path, label, seed_coords = item
+                seed_radius = None
             else:
                 brain_map_path, label = item
                 seed_coords = None
+                seed_radius = None
             
             try:
                 # Create stat map visualization centered at seed
                 fig = plot_lightbox_axial_slices(
                     str(brain_map_path),
                     seed_coords=seed_coords,
+                    seed_radius=seed_radius,
                     title=f"Connectivity Map: {label}",
                     n_slices=12,
                     n_cols=3
