@@ -156,3 +156,55 @@ def validate_string_not_empty(
     
     if len(value.strip()) == 0:
         raise ValueError(f"{name} cannot be empty")
+
+
+def sanitize_filename(value: str) -> str:
+    """Sanitize a string for use in filenames.
+    
+    Replaces problematic characters that can cause issues in filenames:
+    - Spaces → underscores
+    - Forward slashes → underscores
+    - Backslashes → underscores
+    - Colons → removed (common in timestamps)
+    - Other special characters → removed or replaced
+    
+    This ensures filenames are compatible across all operating systems
+    and don't contain characters that interfere with BIDS filename parsing.
+    
+    Args:
+        value: String to sanitize
+    
+    Returns:
+        Sanitized string safe for use in filenames
+    
+    Example:
+        >>> sanitize_filename("7Networks DMN: PCC")
+        '7Networks_DMN_PCC'
+    """
+    if not isinstance(value, str):
+        return str(value)
+    
+    # Replace spaces with underscores
+    value = value.replace(' ', '_')
+    
+    # Replace path separators with underscores
+    value = value.replace('/', '_').replace('\\', '_')
+    
+    # Remove colons (common in timestamps)
+    value = value.replace(':', '')
+    
+    # Remove other problematic characters but keep alphanumeric, underscores, and hyphens
+    # This preserves BIDS-style entity names like "7Networks_DMN_PCC"
+    sanitized = ""
+    for char in value:
+        if char.isalnum() or char in ('_', '-', '.'):
+            sanitized += char
+    
+    # Clean up multiple consecutive underscores
+    while '__' in sanitized:
+        sanitized = sanitized.replace('__', '_')
+    
+    # Remove leading/trailing underscores/hyphens
+    sanitized = sanitized.strip('_-')
+    
+    return sanitized

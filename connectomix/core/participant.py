@@ -19,13 +19,7 @@ from connectomix.config.defaults import ParticipantConfig
 from connectomix.config.loader import save_config
 from connectomix.io.bids import create_bids_layout, build_bids_path, query_participant_files
 from connectomix.io.paths import create_dataset_description
-from connectomix.io.readers import load_seeds_file, get_repetition_time
-from connectomix.preprocessing.resampling import (
-    check_geometric_consistency,
-    resample_to_reference,
-    save_geometry_info,
-)
-from connectomix.preprocessing.denoising import denoise_image
+from connectomix.io.readers import load_seeds_file, parse_inline_seeds, get_repetition_time
 from connectomix.preprocessing.canica import run_canica_atlas
 from connectomix.preprocessing.censoring import (
     TemporalCensor,
@@ -54,26 +48,26 @@ def run_participant_pipeline(
     
     This function orchestrates:
     1. BIDS layout creation and file discovery
-    2. Geometric consistency checking (across ALL subjects)
-    3. Resampling if needed
-    4. Denoising (confound regression + temporal filtering)
-    5. CanICA atlas generation (if method=roiToRoi and atlas=canica)
-    6. Connectivity computation (one of four methods)
-    7. Output saving with BIDS-compliant names and JSON sidecars
+    2. Temporal censoring (if enabled)
+    3. CanICA atlas generation (if method=roiToRoi and atlas=canica)
+    4. Connectivity computation (one of four methods)
+    5. Output saving with BIDS-compliant names and JSON sidecars
+    
+    Note: Geometric consistency checking and resampling are now handled
+    by the upstream denoising tool (fmridenoiser), not by connectomix.
     
     Args:
         bids_dir: Path to BIDS dataset root.
         output_dir: Path for output derivatives.
         config: ParticipantConfig instance with analysis parameters.
         derivatives: Optional dict mapping derivative names to paths.
-            If None, looks for fmriprep in standard location.
+            If None, looks for fmridenoiser or fmriprep in standard location.
         logger: Logger instance. If None, creates one.
     
     Returns:
         Dictionary with keys mapping to lists of output file paths:
             - 'connectivity': List of connectivity output files
             - 'denoised': List of denoised functional images
-            - 'resampled': List of resampled images (if resampling needed)
     
     Raises:
         BIDSError: If BIDS dataset or derivatives are invalid.
@@ -102,7 +96,6 @@ def run_participant_pipeline(
     outputs = {
         'connectivity': [],
         'denoised': [],
-        'resampled': [],
     }
     
     with timer(logger, "Participant-level analysis"):
@@ -119,6 +112,14 @@ def run_participant_pipeline(
         
         # Create BIDS layout
         layout = create_bids_layout(bids_dir, derivatives, logger)
+        
+        # Validate condition masking requirements
+        _validate_condition_masking_setup(
+            config=config,
+            bids_dir=bids_dir,
+            layout=layout,
+            logger=logger,
+        )
         
         # Validate requested participant labels exist in dataset
         available_subjects = set(layout.get_subjects())
@@ -150,7 +151,7 @@ def run_participant_pipeline(
         # Build entity filter from config
         entities = _build_entity_filter(config)
         
-        # Query fMRIPrep files
+        # Query denoised files (from fmridenoiser or fMRIPrep)
         files = query_participant_files(layout, entities, logger)
         
         n_files = len(files['func'])
@@ -159,38 +160,16 @@ def run_participant_pipeline(
         if n_files == 0:
             raise BIDSError(
                 "No functional files found matching the specified criteria.\n"
-                "Please check your BIDS entities and fMRIPrep outputs."
+                "Connectomix requires either:\n"
+                "  (1) fmridenoiser denoised outputs (desc-denoised_bold), or\n"
+                "  (2) fMRIPrep preprocessed outputs (desc-preproc_bold)\n"
+                "Please check your BIDS entities and ensure preprocessing outputs exist."
             )
         
-        # === Step 3: Geometric consistency check ===
-        log_section(logger, "Geometric Consistency")
+        # Note: Geometric consistency checking and resampling are now handled
+        # by the upstream denoising tool (fmridenoiser), not by connectomix
         
-        # Get ALL functional files for geometry check (not just selected)
-        all_func_files = _get_all_functional_files(layout, entities, logger)
-        
-        # Determine reference image and path FIRST (before consistency check)
-        # The reference should be from ALL files in dataset for consistency across participants
-        if config.reference_functional_file == "first_functional_file":
-            reference_path = Path(all_func_files[0])
-            reference_img = nib.load(reference_path)
-            logger.info(f"Using first functional file from dataset as reference: {reference_path.name}")
-        else:
-            reference_path = Path(config.reference_functional_file)
-            reference_img = nib.load(reference_path)
-            logger.info(f"Using custom reference: {reference_path}")
-        
-        # Check consistency using the same reference that will be used for resampling
-        is_consistent, geometries = check_geometric_consistency(
-            all_func_files, logger, reference_file=reference_path
-        )
-        
-        # Log reference geometry at INFO level if resampling will be needed
-        if not is_consistent:
-            ref_shape = reference_img.shape[:3]
-            ref_voxel = [float(reference_img.header.get_zooms()[i]) for i in range(3)]
-            logger.info(f"Reference geometry: shape={ref_shape}, voxel size={ref_voxel} mm")
-        
-        # === Step 4: Generate CanICA atlas if needed ===
+        # === Step 3: Generate CanICA atlas if needed ===
         atlas_img = None
         atlas_labels = None
         atlas_coords = None
@@ -219,134 +198,66 @@ def run_participant_pipeline(
             # Load standard atlas with coordinates
             atlas_img, atlas_labels, atlas_coords = _load_standard_atlas(config.atlas, logger)
         
-        # === Step 5: Load seeds if needed ===
+        # === Step 4: Load seeds if needed ===
         seeds_coords = None
         seeds_names = None
         
         if config.method in ["seedToVoxel", "seedToSeed"]:
-            if config.seeds_file is None:
+            if config.seeds_file is not None:
+                # Load seeds from file
+                seeds_names, seeds_coords = load_seeds_file(config.seeds_file)
+                logger.info(f"Loaded {len(seeds_names)} seed(s) from {config.seeds_file}")
+            elif config.seeds is not None:
+                # Parse inline seeds from configuration
+                seeds_names, seeds_coords = parse_inline_seeds(config.seeds)
+                logger.info(f"Loaded {len(seeds_names)} seed(s) from configuration")
+            else:
                 raise ConnectomixError(
-                    f"seeds_file is required for method '{config.method}'"
+                    f"Either 'seeds_file' or 'seeds' is required for method '{config.method}'"
                 )
-            
-            seeds_names, seeds_coords = load_seeds_file(config.seeds_file)
-            logger.info(f"Loaded {len(seeds_names)} seed(s) from {config.seeds_file}")
         
-        # === Step 6: Process each functional file ===
+        # === Step 5: Process each functional file ===
         log_section(logger, "Processing")
         
-        for i, (func_path, confounds_path) in enumerate(
-            zip(files['func'], files['confounds'])
-        ):
+        for i, func_path in enumerate(files['func']):
             func_path = Path(func_path)
-            confounds_path = Path(confounds_path)
+            denoised_func_path = func_path
             
             logger.info(f"Processing file {i+1}/{n_files}: {func_path.name}")
             
             # Extract entities from filename
             file_entities = _extract_entities_from_path(func_path)
             
-            # Add denoising strategy to entities if using a predefined strategy
-            if config.denoising_strategy:
-                file_entities['denoise'] = config.denoising_strategy
-            
             # Track all connectivity outputs for this file
             connectivity_paths = []
             
-            # Track resampling info for report
-            resampling_info_for_report = None
-            
             with timer(logger, f"  Subject {file_entities.get('sub', 'unknown')}"):
-                # --- Resample if needed ---
-                if not is_consistent:
-                    resampled_path = _get_output_path(
-                        output_dir, file_entities, "resampled", "bold", ".nii.gz",
-                        label=config.label, subfolder="func"
-                    )
-                    
-                    # Load original image before resampling (for geometry tracking)
-                    original_img = nib.load(func_path)
-                    
-                    func_img = resample_to_reference(
-                        func_path,
-                        reference_img,
-                        resampled_path,
-                        logger,
-                    )
-                    outputs['resampled'].append(resampled_path)
-                    
-                    # Build resampling info for report
-                    resampling_info_for_report = {
-                        'resampled': True,
-                        'reference_file': str(reference_path),
-                        'original_shape': list(original_img.shape[:3]),
-                        'original_voxel_size': [float(original_img.header.get_zooms()[i]) for i in range(3)],
-                        'reference_shape': list(reference_img.shape[:3]),
-                        'reference_voxel_size': [float(reference_img.header.get_zooms()[i]) for i in range(3)],
-                        'final_shape': list(func_img.shape[:3]),
-                        'final_voxel_size': [float(func_img.header.get_zooms()[i]) for i in range(3)],
-                    }
-                    
-                    # Save geometry info with full resampling provenance
-                    geometry_path = resampled_path.with_suffix('').with_suffix('.json')
-                    if not geometry_path.exists():
-                        source_json = func_path.with_suffix('').with_suffix('.json')
-                        save_geometry_info(
-                            img=func_img,
-                            output_path=geometry_path,
-                            reference_path=reference_path,
-                            reference_img=reference_img,
-                            original_path=func_path,
-                            original_img=original_img,
-                            source_json=source_json,
-                        )
-                    
-                    # Use resampled path for denoising
-                    input_for_denoise = resampled_path
-                else:
-                    func_img = nib.load(func_path)
-                    input_for_denoise = func_path
+                # Load the already-processed functional image from denoising tool
+                denoised_img = nib.load(func_path)
                 
-                # Load the input image for denoising (for histogram comparison)
-                input_img_for_histogram = nib.load(input_for_denoise)
-                
-                # --- Denoise ---
-                denoised_path = _get_output_path(
-                    output_dir, file_entities, "denoised", "bold", ".nii.gz",
-                    label=config.label, subfolder="func"
-                )
-                
-                denoise_image(
-                    input_for_denoise,
-                    confounds_path,
-                    config.confounds,
-                    config.high_pass,
-                    config.low_pass,
-                    denoised_path,
-                    logger,
-                    overwrite=config.overwrite_denoised_files,
-                )
-                outputs['denoised'].append(denoised_path)
-                
-                # Load denoised image for connectivity
-                denoised_img = nib.load(denoised_path)
-                
-                # Compute denoising histogram data for QA report
-                from connectomix.preprocessing.denoising import compute_denoising_histogram_data
-                denoising_histogram_data = compute_denoising_histogram_data(
-                    original_img=input_img_for_histogram,
-                    denoised_img=denoised_img,
-                )
+                # Denoising histogram data is not needed since input is already denoised
+                denoising_histogram_data = None
                 
                 # --- Apply temporal censoring if enabled ---
                 censor = None
                 censoring_summary = None
                 
+                # Extract TR from metadata (needed for GLM-based methods)
+                json_path = func_path.with_suffix('').with_suffix('.json')
+                if json_path.exists():
+                    t_r = get_repetition_time(json_path)
+                else:
+                    # Try to get TR from NIfTI header
+                    if len(denoised_img.header.get_zooms()) > 3:
+                        t_r = float(denoised_img.header.get_zooms()[3])
+                    else:
+                        t_r = 2.0  # Default assumption
+                        logger.debug(f"Could not determine TR, assuming {t_r}s")
+                
                 if config.temporal_censoring.enabled:
                     censor, censoring_summary = _apply_temporal_censoring(
                         denoised_img=denoised_img,
                         func_path=func_path,
-                        confounds_path=confounds_path,
                         layout=layout,
                         config=config,
                         logger=logger,
@@ -402,6 +313,8 @@ def run_participant_pipeline(
                             atlas_labels=atlas_labels,
                             atlas_coords=atlas_coords,
                             logger=logger,
+                            t_r=t_r,
+                            denoised_func_path=denoised_func_path,
                         )
                         outputs['connectivity'].extend(connectivity_paths_cond)
                         connectivity_paths.extend(connectivity_paths_cond)
@@ -429,6 +342,8 @@ def run_participant_pipeline(
                         atlas_labels=atlas_labels,
                         atlas_coords=atlas_coords,
                         logger=logger,
+                        t_r=t_r,
+                        denoised_func_path=denoised_func_path,
                     )
                     outputs['connectivity'].extend(connectivity_paths_single)
                     connectivity_paths = connectivity_paths_single
@@ -456,7 +371,6 @@ def run_participant_pipeline(
                     file_entities=file_entities,
                     config=config,
                     output_dir=output_dir,
-                    confounds_path=confounds_path,
                     connectivity_paths=connectivity_paths,
                     atlas_labels=atlas_labels,
                     logger=logger,
@@ -466,7 +380,8 @@ def run_participant_pipeline(
                     connectivity_matrices=connectivity_matrices_for_report,
                     roi_names=roi_names_for_report,
                     denoising_histogram_data=denoising_histogram_data,
-                    resampling_info=resampling_info_for_report,
+                    seeds_names=seeds_names,
+                    seeds_coords=seeds_coords,
                 )
         
         # === Summary ===
@@ -483,23 +398,29 @@ def _build_cli_command(
     config: ParticipantConfig,
     file_entities: Dict[str, str],
 ) -> str:
-    """Build a generic CLI command from the configuration for reproducibility.
+    """Build a complete, reproducible CLI command from the configuration.
     
-    Paths are replaced with placeholders to avoid exposing user-specific paths.
+    Reconstructs the exact command-line arguments needed to reproduce this
+    analysis. Paths are replaced with generic placeholders to avoid exposing
+    user-specific directory structures.
     
     Parameters
     ----------
     config : ParticipantConfig
-        Configuration object.
+        Configuration object with all analysis parameters.
     file_entities : dict
-        BIDS entities for the current file.
+        BIDS entities (subject, session, task, run, etc.) for the current file.
     
     Returns
     -------
     str
-        CLI command with generic path placeholders.
+        Complete CLI command with placeholders for paths, formatted for easy copying.
     """
     parts = ["connectomix /path/to/rawdata /path/to/derivatives participant"]
+    
+    # ========================================================================
+    # BIDS Data Filters
+    # ========================================================================
     
     # Add participant label (check both 'subject' and 'sub' keys)
     subject = file_entities.get('subject') or file_entities.get('sub')
@@ -521,46 +442,103 @@ def _build_cli_command(
     if run:
         parts.append(f"--run {run}")
     
+    # ========================================================================
+    # Analysis Method and Method-Specific Arguments
+    # ========================================================================
+    
     # Add method
     parts.append(f"--method {config.method}")
     
-    # Add atlas for ROI methods
-    if config.method in ["roiToRoi", "seedToSeed"] and config.atlas:
-        parts.append(f"--atlas {config.atlas}")
+    # Add method-specific parameters
+    if config.method in ["seedToVoxel", "seedToSeed"]:
+        # Seed-based methods
+        if config.seeds_file:
+            parts.append(f"--seeds-file /path/to/seeds.tsv")
+        
+        if config.radius != 5.0:  # Only add if non-default
+            parts.append(f"--radius {config.radius}")
+        
+        if config.method == "seedToSeed" and config.atlas:
+            parts.append(f"--atlas {config.atlas}")
     
-    # Add denoising options - show ALL confounds for full reproducibility
-    if config.confounds:
-        confounds_str = " ".join(config.confounds)
-        parts.append(f"--confounds {confounds_str}")
+    elif config.method == "roiToVoxel":
+        # ROI-to-voxel method
+        if config.roi_atlas:
+            parts.append(f"--roi-atlas {config.roi_atlas}")
+        
+        if config.roi_masks:
+            # Replace actual paths with generic placeholder
+            parts.append(f"--roi-mask /path/to/roi1.nii.gz /path/to/roi2.nii.gz")
+        
+        if config.roi_label:
+            label_str = " ".join(config.roi_label)
+            parts.append(f"--roi-label {label_str}")
     
-    if config.high_pass:
-        parts.append(f"--high-pass {config.high_pass}")
+    elif config.method == "roiToRoi":
+        # ROI-to-ROI method
+        if config.atlas:
+            parts.append(f"--atlas {config.atlas}")
     
-    if config.low_pass:
-        parts.append(f"--low-pass {config.low_pass}")
+    # ========================================================================
+    # Connectivity Options
+    # ========================================================================
     
-    # Add temporal censoring options if enabled
+    if config.connectivity_kind and config.connectivity_kind != "correlation":
+        parts.append(f"--connectivity-kind {config.connectivity_kind}")
+    
+    # ========================================================================
+    # CanICA Parameters (if using CanICA)
+    # ========================================================================
+    
+    if config.method == "roiToRoi" and config.atlas and config.atlas.lower() == "canica":
+        parts.append(f"--n-components {config.n_components}")
+        
+        if config.canica_threshold != 1.0:
+            parts.append(f"--canica-threshold {config.canica_threshold}")
+        
+        if config.canica_min_region_size != 50:
+            parts.append(f"--canica-min-region-size {config.canica_min_region_size}")
+    
+    # ========================================================================
+    # Temporal Processing Options
+    # ========================================================================
+    
+    # Temporal censoring (deprecated but kept for backward compatibility)
     if config.temporal_censoring.enabled:
         tc = config.temporal_censoring
         
         if tc.drop_initial_volumes > 0:
             parts.append(f"--drop-initial {tc.drop_initial_volumes}")
-        
-        if tc.motion_censoring.enabled and tc.motion_censoring.fd_threshold:
-            parts.append(f"--fd-threshold {tc.motion_censoring.fd_threshold}")
-            extend = tc.motion_censoring.extend_before or tc.motion_censoring.extend_after
-            if extend > 0:
-                parts.append(f"--fd-extend {extend}")
-        
-        if tc.condition_selection.enabled and tc.condition_selection.conditions:
-            conditions_str = " ".join(tc.condition_selection.conditions)
-            parts.append(f"--conditions {conditions_str}")
     
-    # Add label if set
+    # ========================================================================
+    # Condition Masking (Task fMRI)
+    # ========================================================================
+    
+    if config.condition_masking.enabled:
+        cm = config.condition_masking
+        
+        if cm.conditions:
+            conditions_str = " ".join(cm.conditions)
+            parts.append(f"--conditions {conditions_str}")
+        
+        if cm.transition_buffer > 0:
+            parts.append(f"--transition-buffer {cm.transition_buffer}")
+    
+    # ========================================================================
+    # Output Options
+    # ========================================================================
+    
     if config.label:
         parts.append(f"--label {config.label}")
     
-    # Join with spaces - each option on same line for clean display
+    # ========================================================================
+    # Derivatives Path
+    # ========================================================================
+    
+    if config.denoised_derivatives:
+        parts.append(f"--derivatives fmridenoiser=/path/to/fmridenoiser")
+    
+    # Join with spaces for clean, readable display
     return " ".join(parts)
 
 
@@ -568,7 +546,6 @@ def _generate_participant_report(
     file_entities: Dict[str, str],
     config: ParticipantConfig,
     output_dir: Path,
-    confounds_path: Path,
     connectivity_paths: List[Path],
     atlas_labels: Optional[List[str]],
     logger: logging.Logger,
@@ -578,7 +555,8 @@ def _generate_participant_report(
     connectivity_matrices: Optional[Dict[str, np.ndarray]] = None,
     roi_names: Optional[List[str]] = None,
     denoising_histogram_data: Optional[Dict] = None,
-    resampling_info: Optional[Dict] = None,
+    seeds_names: Optional[List[str]] = None,
+    seeds_coords: Optional[np.ndarray] = None,
 ) -> Optional[Path]:
     """Generate HTML report for a participant analysis.
     
@@ -590,8 +568,6 @@ def _generate_participant_report(
         Configuration object.
     output_dir : Path
         Output directory.
-    confounds_path : Path
-        Path to confounds file.
     connectivity_paths : list
         List of connectivity output paths.
     atlas_labels : list or None
@@ -608,8 +584,12 @@ def _generate_participant_report(
         Dictionary mapping connectivity kind to matrix (for roiToRoi method).
     roi_names : list or None
         List of ROI names for connectivity matrices.
-    resampling_info : dict or None
-        Information about resampling performed (reference, original geometry, etc.).
+    denoising_histogram_data : dict or None
+        Denoising histogram data (not used since connectomix consumes denoised data).
+    seeds_names : list or None
+        List of seed names (for seedToVoxel/seedToSeed methods).
+    seeds_coords : ndarray or None
+        Seed coordinates array, shape (n_seeds, 3) in mm (for seedToVoxel/seedToSeed methods).
     
     Returns
     -------
@@ -619,20 +599,8 @@ def _generate_participant_report(
     try:
         log_section(logger, "Generating HTML Report")
         
-        # Load confounds for denoising plots
-        confounds_df = pd.read_csv(confounds_path, sep='\t')
-        
-        # Use the same wildcard expansion as denoising to get exact confound names
-        from connectomix.io.readers import expand_confound_wildcards
-        selected_confounds = expand_confound_wildcards(
-            config.confounds, 
-            confounds_df.columns.tolist()
-        )
-        
-        if not selected_confounds:
-            # Fall back to some common confounds
-            common = ['trans_x', 'trans_y', 'trans_z', 'rot_x', 'rot_y', 'rot_z']
-            selected_confounds = [c for c in common if c in confounds_df.columns]
+        # No confounds metadata since connectomix uses pre-denoised data from fmridenoiser
+        selected_confounds = []
         
         # Use provided connectivity matrices, or load from file for backward compatibility
         if connectivity_matrices is None:
@@ -670,8 +638,17 @@ def _generate_participant_report(
             subject_label += f"_run-{run}"
         
         # Build desc entity based on method and atlas/seeds
-        if config.method in ["roiToRoi", "roiToVoxel"]:
+        if config.method == "roiToRoi":
             desc = config.atlas if config.atlas else config.method
+        elif config.method == "roiToVoxel":
+            # For roiToVoxel, use the first ROI label as desc
+            if config.roi_label and len(config.roi_label) > 0:
+                desc = config.roi_label[0]
+            elif config.roi_atlas:
+                # Fallback to atlas name if no label somehow
+                desc = config.roi_atlas
+            else:
+                desc = config.method
         elif config.method in ["seedToSeed", "seedToVoxel"]:
             # Use seeds file name without extension
             if config.seeds_file:
@@ -686,23 +663,28 @@ def _generate_participant_report(
         if connectivity_matrices:
             primary_matrix = connectivity_matrices.get('correlation')
         
+        # Add denoising strategy to desc if available (to differentiate reports)
+        # The denoise entity is extracted from file_entities (e.g., 'scrubbing5' or 'simpleGSR')
+        if file_entities.get('denoise'):
+            desc_for_report = f"{file_entities['denoise']}_desc-{desc}" if desc else f"{file_entities['denoise']}"
+        else:
+            desc_for_report = desc
+        
         # Create report generator
         report = ParticipantReportGenerator(
             subject_id=subject_label,
             config=config,
             output_dir=output_dir,
-            confounds_df=confounds_df,
-            selected_confounds=selected_confounds,
             connectivity_matrix=primary_matrix,
             roi_names=roi_names,
             connectivity_paths=connectivity_paths,
             logger=logger,
-            desc=desc,
+            desc=desc_for_report,
             label=config.label,
             censoring_summary=censoring_summary,
             condition=condition,
             censoring=censoring,
-            resampling_info=resampling_info,
+            denoising_strategy=file_entities.get('denoise'),
         )
         
         # Add denoising histogram data if available
@@ -721,6 +703,84 @@ def _generate_participant_report(
                     continue
                 report.add_connectivity_matrix(matrix, roi_names, f"{config.atlas}_{kind}")
         
+        # Add brain maps for seedToVoxel and roiToVoxel methods
+        if config.method in ["seedToVoxel", "roiToVoxel"]:
+            # Find NIfTI files (brain maps) in connectivity_paths
+            nifti_files = [p for p in connectivity_paths if p.suffix in ['.gz', '.nii']]
+            
+            logger.debug(f"Found {len(nifti_files)} NIfTI files for {config.method}")
+            
+            # Load seeds or ROIs to get labels and coordinates for each brain map
+            labels = []
+            seed_coords_list = []
+            seed_radius_list = []
+            seed_name_to_coords = {}  # Map seed name to coordinates
+            
+            if config.method == "seedToVoxel" and seeds_names is not None and seeds_coords is not None:
+                # Use the seeds that were already loaded earlier in this function
+                logger.debug(f"Using {len(seeds_names)} seeds already loaded for seedToVoxel")
+                seed_name_to_coords = {name: list(coord) for name, coord in zip(seeds_names, seeds_coords)}
+                logger.debug(f"Seeds available: {list(seed_name_to_coords.keys())}")
+            elif config.method == "roiToVoxel" and (config.roi_masks or config.roi_atlas):
+                logger.debug(f"Using ROI masks for roiToVoxel")
+            else:
+                logger.debug(f"No seeds/ROIs available - will use file names as labels")
+            
+            # Extract seed name from each brain map filename and match to coordinates
+            for nifti_file in nifti_files:
+                filename = nifti_file.name
+                logger.debug(f"Processing brain map: {filename}")
+                
+                # Try to extract seed name from filename (look for 'seed-SEEDNAME' pattern)
+                if config.method == "seedToVoxel":
+                    # Extract seed name from filename like "seed-PCC_desc-..."
+                    import re
+                    seed_match = re.search(r'seed-([^_]+)', filename)
+                    if seed_match:
+                        seed_name = seed_match.group(1)
+                        logger.debug(f"  Extracted seed name: {seed_name}")
+                        label = seed_name
+                        seed_coords = seed_name_to_coords.get(seed_name)
+                        logger.debug(f"  Coordinates for {seed_name}: {seed_coords}")
+                        seed_radius = config.radius  # Get radius from config
+                    else:
+                        logger.warning(f"  Could not extract seed name from filename: {filename}")
+                        label = nifti_file.stem
+                        seed_coords = None
+                        seed_radius = None
+                elif config.method == "roiToVoxel" and (config.roi_masks or config.roi_atlas):
+                    # For roiToVoxel, use ROI mask or atlas label
+                    if config.roi_masks:
+                        label = Path(config.roi_masks[0]).stem if config.roi_masks else nifti_file.stem
+                    else:
+                        # Extract ROI name from filename (roi-ROINAME pattern)
+                        import re
+                        roi_match = re.search(r'roi-([^_]+)', filename)
+                        label = roi_match.group(1) if roi_match else nifti_file.stem
+                    seed_coords = None
+                    seed_radius = None
+                else:
+                    # Fallback: use filename
+                    label = nifti_file.stem
+                    seed_coords = None
+                    seed_radius = None
+                
+                labels.append(label)
+                seed_coords_list.append(seed_coords)
+                seed_radius_list.append(seed_radius)
+            
+            # Add each brain map to the report
+            for nifti_file, label, seed_coords, seed_radius in zip(nifti_files, labels, seed_coords_list, seed_radius_list):
+                try:
+                    if config.method == "seedToVoxel":
+                        logger.debug(f"Adding brain map: label={label}, seed_coords={seed_coords}, seed_radius={seed_radius}")
+                    else:  # roiToVoxel
+                        logger.debug(f"Adding brain map: label={label}")
+                    report.add_brain_map(nifti_file, label, seed_coords, seed_radius)
+                    logger.debug(f"Added brain map to report: {label} ({nifti_file.name})")
+                except Exception as e:
+                    logger.warning(f"Failed to add brain map {nifti_file.name}: {e}")
+        
         # Generate report
         report_path = report.generate()
         
@@ -737,7 +797,6 @@ def _generate_participant_report(
 def _apply_temporal_censoring(
     denoised_img: nib.Nifti1Image,
     func_path: Path,
-    confounds_path: Path,
     layout: "BIDSLayout",
     config: ParticipantConfig,
     logger: logging.Logger,
@@ -750,8 +809,6 @@ def _apply_temporal_censoring(
         Denoised functional image.
     func_path : Path
         Original functional file path (for finding events file).
-    confounds_path : Path
-        Path to confounds file.
     layout : BIDSLayout
         BIDS layout for finding events file.
     config : ParticipantConfig
@@ -797,22 +854,24 @@ def _apply_temporal_censoring(
     if config.temporal_censoring.drop_initial_volumes > 0:
         censor.apply_initial_drop()
     
-    # Apply motion censoring
-    if config.temporal_censoring.motion_censoring.enabled:
-        confounds_df = pd.read_csv(confounds_path, sep='\t')
-        censor.apply_motion_censoring(confounds_df)
-        
-        # Apply segment filtering (scrubbing) if configured
-        min_seg = config.temporal_censoring.motion_censoring.min_segment_length
-        if min_seg > 0:
-            censor.apply_segment_filtering(min_seg)
-    
     # Apply condition selection
-    if config.temporal_censoring.condition_selection.enabled:
+    # Check both condition_masking (new) and temporal_censoring.condition_selection (legacy)
+    conditions_to_apply = None
+    events_file_path = None
+    
+    if config.condition_masking.enabled and config.condition_masking.conditions:
+        # New condition_masking config (from CLI)
+        conditions_to_apply = config.condition_masking.conditions
+        events_file_path = config.condition_masking.events_file
+    elif config.temporal_censoring.condition_selection.get('enabled', False):
+        # Legacy temporal_censoring config
         cs = config.temporal_censoring.condition_selection
-        
+        conditions_to_apply = cs.get('conditions', [])
+        events_file_path = cs.get('events_file', 'auto')
+    
+    if conditions_to_apply:
         # Find events file using BIDSLayout
-        if cs.events_file == "auto":
+        if events_file_path == "auto" or events_file_path is None:
             events_path = find_events_file(func_path, layout, logger)
             if events_path is None:
                 raise PreprocessingError(
@@ -820,15 +879,14 @@ def _apply_temporal_censoring(
                     f"Please specify --events-file or place events.tsv in BIDS structure."
                 )
         else:
-            events_path = Path(cs.events_file)
+            events_path = Path(events_file_path)
         
         # Load events
         events_df = load_events_file(events_path, logger)
         logger.info(f"Loaded events file: {events_path.name}")
         
-        # Apply condition selection
-        censor.apply_condition_selection(events_df)
-    
+        # Apply condition selection with masking config for transition_buffer
+        censor.apply_condition_selection(events_df, conditions_to_apply, config.condition_masking)
     # Apply custom mask if provided
     if config.temporal_censoring.custom_mask_file:
         censor.apply_custom_mask(config.temporal_censoring.custom_mask_file)
@@ -863,31 +921,6 @@ def _build_entity_filter(config: ParticipantConfig) -> Dict[str, any]:
         entities['space'] = config.spaces[0] if len(config.spaces) == 1 else config.spaces
     
     return entities
-
-
-def _get_all_functional_files(
-    layout,
-    entities: Dict,
-    logger: logging.Logger,
-) -> List[Path]:
-    """Get ALL functional files for geometry check, not just selected ones."""
-    # Query all fMRIPrep outputs (ignoring subject filter)
-    query = {
-        'extension': 'nii.gz',
-        'suffix': 'bold',
-        'desc': 'preproc',
-        'scope': 'derivatives',
-    }
-    
-    # Keep space filter for consistency
-    if entities.get('space'):
-        query['space'] = entities['space']
-    
-    all_files = layout.get(**query)
-    
-    logger.debug(f"Found {len(all_files)} total functional files for geometry check")
-    
-    return [Path(f.path) for f in all_files]
 
 
 def _extract_entities_from_path(path: Path) -> Dict[str, str]:
@@ -1295,6 +1328,8 @@ def _compute_connectivity(
     atlas_labels: Optional[List[str]],
     atlas_coords: Optional[np.ndarray],
     logger: logging.Logger,
+    t_r: Optional[float] = None,
+    denoised_func_path: Optional[Path] = None,
 ) -> Tuple[List[Path], Optional[Dict[str, np.ndarray]], Optional[List[str]]]:
     """Compute connectivity using the specified method.
     
@@ -1329,30 +1364,93 @@ def _compute_connectivity(
                 output_path=output_path,
                 logger=logger,
                 radius=config.radius,
+                denoised_func_path=denoised_func_path,
+                file_entities=file_entities,
             )
             output_paths.append(output_path)
     
     elif method == "roiToVoxel":
-        # Load ROI masks
-        for roi_path in config.roi_masks:
-            roi_img = nib.load(roi_path)
-            roi_name = Path(roi_path).stem
+        # Handle two approaches: file-based masks or atlas-based labels
+        from connectomix.connectivity.roi_to_voxel import load_roi_mask
+        from connectomix.connectivity.seed_to_voxel import find_masks_directory, load_brain_mask
+        
+        # Load brain mask to restrict GLM analysis to brain voxels
+        brain_mask_img = None
+        try:
+            masks_dir = find_masks_directory(denoised_func_path)
+            brain_mask_img = load_brain_mask(masks_dir, file_entities, logger)
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not load brain mask: {e}")
+            # Continue without brain mask - GLM will analyze all voxels
+        
+        if config.roi_masks:
+            # File-based ROIs - use provided roi_label for each mask
+            for i, roi_path in enumerate(config.roi_masks):
+                # Use the corresponding roi_label for this mask
+                roi_label = config.roi_label[i] if config.roi_label and i < len(config.roi_label) else Path(roi_path).stem
+                
+                # Use load_roi_mask to handle resampling to functional image space
+                # Pass None for roi_label since we're loading from file
+                roi_img, _ = load_roi_mask(
+                    roi_definition=roi_path,
+                    atlas_name=None,  # File-based, not atlas-based
+                    roi_label=None,
+                    target_img=denoised_img,  # Resample to match functional image
+                    logger=logger
+                )
+                
+                # Use user-provided label instead of filename
+                roi_name = roi_label
+                file_entities['roi'] = roi_name
+                
+                output_path = _get_output_path(
+                    output_dir, file_entities, roi_name, "effectSize", ".nii.gz",
+                    label=config.label, subfolder="connectivity_data"
+                )
+                
+                compute_roi_to_voxel(
+                    func_img=denoised_img,
+                    roi_mask=roi_img,
+                    roi_name=roi_name,
+                    output_path=output_path,
+                    brain_mask=brain_mask_img,
+                    logger=logger,
+                    t_r=t_r,
+                )
+                output_paths.append(output_path)
+        
+        elif config.roi_atlas and config.roi_label:
+            # Atlas-based ROIs
+            from connectomix.connectivity.roi_to_voxel import load_roi_mask
             
-            file_entities['roi'] = roi_name
-            
-            output_path = _get_output_path(
-                output_dir, file_entities, roi_name, "effectSize", ".nii.gz",
-                label=config.label, subfolder="connectivity_data"
-            )
-            
-            compute_roi_to_voxel(
-                func_img=denoised_img,
-                roi_img=roi_img,
-                roi_name=roi_name,
-                output_path=output_path,
-                logger=logger,
-            )
-            output_paths.append(output_path)
+            for roi_label in config.roi_label:
+                # Load ROI mask from atlas
+                roi_img, roi_name = load_roi_mask(
+                    roi_definition=config.roi_atlas,
+                    atlas_name=config.roi_atlas,
+                    roi_label=roi_label,
+                    target_img=denoised_img,
+                    logger=logger,
+                )
+                
+                file_entities['roi'] = roi_name
+                
+                output_path = _get_output_path(
+                    output_dir, file_entities, roi_name, "effectSize", ".nii.gz",
+                    label=config.label, subfolder="connectivity_data"
+                )
+                
+                compute_roi_to_voxel(
+                    func_img=denoised_img,
+                    roi_mask=roi_img,
+                    roi_name=roi_name,
+                    output_path=output_path,
+                    brain_mask=brain_mask_img,
+                    logger=logger,
+                    t_r=t_r,
+                )
+                output_paths.append(output_path)
     
     elif method == "seedToSeed":
         output_path = _get_output_path(
@@ -1369,6 +1467,11 @@ def _compute_connectivity(
             radius=config.radius,
         )
         output_paths.append(output_path)
+        
+        # Load the computed matrix for the report
+        connectivity_matrix = np.load(output_path)
+        roi_names = seeds_names
+        connectivity_matrices = {'correlation': connectivity_matrix}
     
     elif method == "roiToRoi":
         file_entities['atlas'] = config.atlas
@@ -1416,3 +1519,99 @@ def _compute_connectivity(
         raise ConnectomixError(f"Unknown method: {method}")
     
     return output_paths, connectivity_matrices, roi_names
+
+
+def _validate_condition_masking_setup(
+    config: ParticipantConfig,
+    bids_dir: Path,
+    layout: "BIDSLayout",
+    logger: logging.Logger,
+) -> None:
+    """Validate that condition masking can be performed if requested.
+    
+    If --conditions is used, ensures that:
+    1. The bids_dir contains the raw BIDS data (with events files), OR
+    2. An explicit events file path is provided via config
+    
+    Args:
+        config: Participant configuration
+        bids_dir: Path to BIDS directory (should be raw BIDS, not derivatives)
+        layout: BIDSLayout instance
+        logger: Logger instance
+    
+    Raises:
+        ConnectomixError: If conditions requested but events files cannot be found
+    """
+    # Check if condition masking is requested
+    has_conditions = (
+        config.condition_masking.enabled and 
+        config.condition_masking.conditions
+    )
+    
+    if not has_conditions:
+        return  # No condition masking needed
+    
+    logger.info("Validating condition masking setup...")
+    
+    # If explicit events file is provided, just validate it exists
+    if config.condition_masking.events_file and config.condition_masking.events_file != "auto":
+        events_path = Path(config.condition_masking.events_file)
+        if not events_path.exists():
+            raise ConnectomixError(
+                f"Specified events file not found: {events_path}\n"
+                f"Please check that the path is correct."
+            )
+        logger.info(f"Using explicit events file: {events_path}")
+        return
+    
+    # Try to find events files in the BIDS directory
+    bids_path = Path(bids_dir)
+    raw_events_files = sorted(bids_path.glob("**/task-*_events.tsv"))
+    
+    if raw_events_files:
+        logger.info(
+            f"Found {len(raw_events_files)} events file(s) in {bids_dir}. "
+            f"Will auto-detect matching events file for each functional scan."
+        )
+        return
+    
+    # No events files found - try to detect if they passed a derivatives directory
+    is_likely_derivative = (
+        (bids_path.name == "fmridenoiser" or "fmridenoiser" in str(bids_path)) or
+        (bids_path.name == "fmriprep" or "fmriprep" in str(bids_path)) or
+        ("derivatives" in str(bids_path))
+    )
+    
+    error_msg = (
+        f"Condition-based masking requested (--conditions {' '.join(config.condition_masking.conditions)}), "
+        f"but no events.tsv files found in {bids_dir}.\n\n"
+    )
+    
+    if is_likely_derivative:
+        error_msg += (
+            f"⚠️  It looks like you passed a DERIVATIVES directory instead of the RAW BIDS directory.\n\n"
+            f"To use condition-based masking, you must:\n"
+            f"  1. Use the RAW BIDS directory as the first argument (the one containing sub-*, task-*_events.tsv, etc.), OR\n"
+            f"  2. Use --events-file to explicitly specify the events.tsv file path\n\n"
+            f"Example with RAW BIDS:\n"
+            f"  connectomix /path/to/raw/bids /path/to/derivatives participant --conditions language\n\n"
+            f"Example with explicit events file:\n"
+            f"  connectomix {bids_dir} /path/to/derivatives participant \\\n"
+            f"      --conditions language --events-file /path/to/sub-021_task-language_events.tsv\n\n"
+        )
+    else:
+        error_msg += (
+            f"To use condition-based masking, you must:\n"
+            f"  1. Provide the RAW BIDS directory as the first argument (containing *_events.tsv files), OR\n"
+            f"  2. Use --events-file to explicitly specify the events file path\n\n"
+            f"(Note: The current directory does not appear to contain BIDS events files.)\n\n"
+            f"Your current bids_dir: {bids_dir}\n"
+            f"Searched pattern: {bids_dir}/**/task-*_events.tsv\n\n"
+        )
+    
+    error_msg += (
+        f"For more information on BIDS structure, see:\n"
+        f"  https://bids-specification.readthedocs.io/en/stable/99-appendices/03-bnf.html"
+    )
+    
+    raise ConnectomixError(error_msg)

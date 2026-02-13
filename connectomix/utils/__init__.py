@@ -1,7 +1,7 @@
 """Utility functions for Connectomix."""
 
 from connectomix.utils.logging import setup_logging, timer
-from connectomix.utils.validation import validate_alpha, validate_positive, validate_file_exists
+from connectomix.utils.validation import validate_alpha, validate_positive, validate_file_exists, sanitize_filename
 from connectomix.utils.matrix import sym_matrix_to_vec, vec_to_sym_matrix
 from connectomix.utils.visualization import (
     plot_design_matrix,
@@ -27,6 +27,7 @@ __all__ = [
     "validate_alpha",
     "validate_positive",
     "validate_file_exists",
+    "sanitize_filename",
     # Matrix utilities
     "sym_matrix_to_vec",
     "vec_to_sym_matrix",

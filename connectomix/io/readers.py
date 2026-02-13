@@ -1,135 +1,15 @@
-"""File readers for various formats."""
+"""File readers for various formats.
 
-import fnmatch
+Confound loading (load_confounds, expand_confound_wildcards) has moved
+to fmridenoiser. This module retains readers needed by connectomix:
+seeds, participants, JSON sidecars, and repetition time.
+"""
+
 import pandas as pd
 import numpy as np
 from pathlib import Path
 from typing import List, Tuple, Dict, Any
 import json
-
-
-def expand_confound_wildcards(
-    confound_patterns: List[str],
-    available_columns: List[str],
-) -> List[str]:
-    """Expand wildcard patterns to match actual confound column names.
-    
-    Supports shell-style wildcards:
-    - '*' matches any number of characters
-    - '?' matches single character
-    - '[seq]' matches any character in seq
-    
-    Args:
-        confound_patterns: List of confound names, may contain wildcards.
-        available_columns: List of available column names in confounds file.
-    
-    Returns:
-        List of expanded confound column names (no duplicates, order preserved).
-    
-    Example:
-        >>> expand_confound_wildcards(['trans_*', 'rot_*'], columns)
-        ['trans_x', 'trans_y', 'trans_z', 'rot_x', 'rot_y', 'rot_z']
-        
-        >>> expand_confound_wildcards(['a_comp_cor_0*'], columns)
-        ['a_comp_cor_00', 'a_comp_cor_01', ..., 'a_comp_cor_09']
-    """
-    expanded = []
-    seen = set()
-    
-    for pattern in confound_patterns:
-        if '*' in pattern or '?' in pattern or '[' in pattern:
-            # Pattern contains wildcards - expand it
-            matches = fnmatch.filter(available_columns, pattern)
-            # Sort matches for consistent ordering
-            matches = sorted(matches)
-            for match in matches:
-                if match not in seen:
-                    expanded.append(match)
-                    seen.add(match)
-        else:
-            # No wildcards - use as-is
-            if pattern not in seen:
-                expanded.append(pattern)
-                seen.add(pattern)
-    
-    return expanded
-
-
-def load_confounds(
-    confounds_path: Path,
-    confound_names: List[str]
-) -> Tuple[np.ndarray, List[str]]:
-    """Load and extract confounds from TSV file.
-    
-    Supports wildcard patterns in confound names:
-    - '*' matches any number of characters
-    - '?' matches single character
-    
-    Args:
-        confounds_path: Path to fMRIPrep confounds TSV file
-        confound_names: List of confound column names or wildcard patterns
-    
-    Returns:
-        Tuple of (confounds_array, expanded_names):
-        - confounds_array: NumPy array of shape (n_timepoints, n_confounds)
-        - expanded_names: List of actual confound column names used
-    
-    Raises:
-        ValueError: If confound columns don't exist or no matches found
-        FileNotFoundError: If confounds file doesn't exist
-    
-    Example:
-        >>> confounds, names = load_confounds(path, ['trans_*', 'rot_*', 'csf'])
-        >>> print(names)
-        ['trans_x', 'trans_y', 'trans_z', 'rot_x', 'rot_y', 'rot_z', 'csf']
-    """
-    if not confounds_path.exists():
-        raise FileNotFoundError(f"Confounds file not found: {confounds_path}")
-    
-    # Load TSV file
-    df = pd.read_csv(confounds_path, sep='\t')
-    
-    # Expand wildcard patterns
-    expanded_names = expand_confound_wildcards(confound_names, df.columns.tolist())
-    
-    # Check if any patterns had no matches
-    for pattern in confound_names:
-        if '*' in pattern or '?' in pattern or '[' in pattern:
-            matches = fnmatch.filter(df.columns.tolist(), pattern)
-            if not matches:
-                available = sorted(df.columns.tolist())
-                raise ValueError(
-                    f"No confounds matching pattern '{pattern}' in {confounds_path.name}.\n"
-                    f"  Available columns: {available[:15]}{'...' if len(available) > 15 else ''}"
-                )
-        else:
-            # Literal name - check it exists
-            if pattern not in df.columns:
-                available = sorted(df.columns.tolist())
-                # Suggest similar columns
-                similar = [c for c in available if pattern.lower() in c.lower()]
-                suggestion = f"\n  Similar columns: {similar[:5]}" if similar else ""
-                raise ValueError(
-                    f"Confound '{pattern}' not found in {confounds_path.name}.{suggestion}\n"
-                    f"  Available columns: {available[:15]}{'...' if len(available) > 15 else ''}"
-                )
-    
-    if not expanded_names:
-        raise ValueError(
-            f"No confounds selected after expanding patterns: {confound_names}"
-        )
-    
-    # Extract confounds
-    confounds = df[expanded_names].values
-    
-    # Handle NaN values (replace with 0 or column mean)
-    if np.any(np.isnan(confounds)):
-        # Replace NaN with column mean
-        col_means = np.nanmean(confounds, axis=0)
-        nan_mask = np.isnan(confounds)
-        confounds[nan_mask] = np.take(col_means, np.where(nan_mask)[1])
-    
-    return confounds, expanded_names
 
 
 def load_seeds_file(seeds_path: Path) -> Tuple[List[str], np.ndarray]:
@@ -173,6 +53,63 @@ def load_seeds_file(seeds_path: Path) -> Tuple[List[str], np.ndarray]:
     coords = df[['x', 'y', 'z']].values.astype(float)
     
     return names, coords
+
+
+def parse_inline_seeds(seeds_list: List[Dict[str, Any]]) -> Tuple[List[str], np.ndarray]:
+    """Parse seeds from inline configuration.
+    
+    Each seed must be a dict with 'name', 'x', 'y', 'z' keys.
+    
+    Example:
+        seeds = [
+            {'name': 'PCC', 'x': 0, 'y': -52, 'z': 18},
+            {'name': 'mPFC', 'x': 0, 'y': 52, 'z': 0}
+        ]
+        names, coords = parse_inline_seeds(seeds)
+    
+    Args:
+        seeds_list: List of seed dictionaries
+    
+    Returns:
+        Tuple of (seed_names, coordinates_array)
+        - seed_names: List of seed region names
+        - coordinates_array: NumPy array of shape (n_seeds, 3) with MNI coordinates
+    
+    Raises:
+        ValueError: If seed structure is invalid
+        TypeError: If seed values cannot be converted to float
+    """
+    if not seeds_list or not isinstance(seeds_list, list):
+        raise ValueError("Seeds must be a non-empty list of dictionaries")
+    
+    names = []
+    coords = []
+    
+    for i, seed in enumerate(seeds_list):
+        if not isinstance(seed, dict):
+            raise TypeError(f"Seed {i} must be a dict, got {type(seed).__name__}")
+        
+        required_keys = {'name', 'x', 'y', 'z'}
+        missing_keys = required_keys - set(seed.keys())
+        if missing_keys:
+            raise ValueError(
+                f"Seed {i} missing required keys: {sorted(missing_keys)}\n"
+                f"Required keys: {sorted(required_keys)}\n"
+                f"Found keys: {list(seed.keys())}"
+            )
+        
+        try:
+            names.append(str(seed['name']))
+            coords.append([float(seed['x']), float(seed['y']), float(seed['z'])])
+        except (ValueError, TypeError) as e:
+            raise ValueError(
+                f"Seed {i} coordinate values must be numeric. "
+                f"Got: x={seed['x']}, y={seed['y']}, z={seed['z']}\n"
+                f"Error: {e}"
+            )
+    
+    return names, np.array(coords)
+
 
 
 def load_participants_tsv(bids_dir: Path) -> pd.DataFrame:

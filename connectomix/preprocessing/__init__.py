@@ -1,19 +1,21 @@
-"""Preprocessing functions for functional images."""
+"""Preprocessing functions for connectivity analysis.
 
-from connectomix.preprocessing.resampling import (
-    resample_to_reference,
-    check_geometric_consistency,
-    save_geometry_info,
-    validate_group_geometry,
-)
-from connectomix.preprocessing.denoising import denoise_image
+Denoising, resampling, and FD-based censoring are handled upstream by
+fmridenoiser. This package provides:
+- CanICA atlas generation
+- Condition masking for task fMRI
+"""
+
 from connectomix.preprocessing.canica import run_canica_atlas
+from connectomix.preprocessing.condition_masking import (
+    ConditionMasker,
+    load_events_file,
+    find_events_file,
+)
 
 __all__ = [
-    "resample_to_reference",
-    "check_geometric_consistency",
-    "save_geometry_info",
-    "validate_group_geometry",
-    "denoise_image",
     "run_canica_atlas",
+    "ConditionMasker",
+    "load_events_file",
+    "find_events_file",
 ]

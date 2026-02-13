@@ -39,7 +39,7 @@ def extract_seeds_timeseries(
         masker = maskers.NiftiSpheresMasker(
             seeds=seeds_coords,
             radius=radius,
-            standardize=True,  # Standardize signal
+            standardize='zscore_sample',  # Standardize signal
             detrend=False,     # Already detrended in preprocessing
             low_pass=None,     # Already filtered in preprocessing
             high_pass=None,
@@ -86,7 +86,7 @@ def extract_roi_timeseries(
         # Create labels masker
         masker = maskers.NiftiLabelsMasker(
             labels_img=atlas_img,
-            standardize=True,  # Standardize signal
+            standardize='zscore_sample',  # Standardize signal
             detrend=False,     # Already detrended in preprocessing
             low_pass=None,     # Already filtered in preprocessing
             high_pass=None,
@@ -133,7 +133,7 @@ def extract_single_region_timeseries(
         # Create masker
         masker = maskers.NiftiMasker(
             mask_img=mask_img,
-            standardize=True,  # Standardize signal
+            standardize='zscore_sample',  # Standardize signal
             detrend=False,     # Already detrended in preprocessing
             low_pass=None,     # Already filtered in preprocessing
             high_pass=None,
@@ -141,11 +141,11 @@ def extract_single_region_timeseries(
             verbose=0
         )
         
-        # Extract time series (average across voxels)
+        # Extract time series (NiftiMasker returns all voxels: n_timepoints x n_voxels)
         time_series = masker.fit_transform(func_img)
         
-        # Should be shape (n_timepoints, 1), flatten to (n_timepoints,)
-        time_series = time_series.flatten()
+        # Average across voxels to get single time series
+        time_series = time_series.mean(axis=1)
         
         if logger:
             logger.debug(f"  Extracted shape: {time_series.shape}")

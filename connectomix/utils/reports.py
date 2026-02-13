@@ -38,6 +38,8 @@ import pandas as pd
 import seaborn as sns
 
 from connectomix.core.version import __version__
+from connectomix.utils.visualization import plot_lightbox_axial_slices
+from connectomix.utils.validation import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -760,6 +762,7 @@ class ParticipantReportGenerator:
         condition: Optional[str] = None,
         censoring: Optional[str] = None,
         resampling_info: Optional[Dict[str, Any]] = None,
+        denoising_strategy: Optional[str] = None,
     ):
         """Initialize report generator.
         
@@ -767,7 +770,7 @@ class ParticipantReportGenerator:
             subject_id: Subject ID or full BIDS label
             config: ParticipantConfig with analysis parameters
             output_dir: Output directory for reports
-            confounds_df: Confounds DataFrame from fMRIPrep
+            confounds_df: Confounds DataFrame from preprocessing (fmridenoiser or fMRIPrep)
             selected_confounds: List of confound columns used
             connectivity_matrix: Connectivity matrix (for ROI methods)
             roi_names: ROI labels for matrix methods
@@ -783,6 +786,7 @@ class ParticipantReportGenerator:
             condition: Condition name for filename (when --conditions is used)
             censoring: Censoring method entity for filename (e.g., 'fd05')
             resampling_info: Information about resampling performed (reference, original geometry, etc.)
+            denoising_strategy: Denoising strategy used (e.g., 'scrubbing5', 'simpleGSR')
         """
         self.subject_id = subject_id
         self.session = session
@@ -817,12 +821,23 @@ class ParticipantReportGenerator:
         self.confounds_df: Optional[pd.DataFrame] = confounds_df
         self.denoising_histogram_data: Optional[Dict[str, Any]] = None
         
+        # Denoising strategy - use parameter if provided, otherwise try config
+        self.denoising_strategy = denoising_strategy or getattr(config, 'denoising_strategy', None)
+        
         # Connectivity results
         self.connectivity_matrices: List[Tuple[np.ndarray, List[str], str]] = []
         
+        # Brain maps (for seedToVoxel and roiToVoxel analyses)
+        self.brain_maps: List[Tuple[Path, str, Optional[np.ndarray]]] = []  # (path, label, seed_coords)
+        
         # Add connectivity matrix if provided
         if connectivity_matrix is not None and roi_names is not None:
-            atlas_name = config.atlas if hasattr(config, 'atlas') and config.atlas else "connectivity"
+            # Only use atlas name if method uses an atlas; otherwise use method name
+            method = getattr(config, 'method', None)
+            if method in ('seedToVoxel', 'seedToSeed'):
+                atlas_name = method
+            else:
+                atlas_name = config.atlas if hasattr(config, 'atlas') and config.atlas else "connectivity"
             self.add_connectivity_matrix(connectivity_matrix, roi_names, atlas_name)
         
         # Command/config info
@@ -842,6 +857,17 @@ class ParticipantReportGenerator:
         self._figure_counter += 1
         return f"fig_{self._figure_counter}"
     
+    def _method_uses_atlas(self) -> bool:
+        """Check if the current analysis method uses an atlas.
+        
+        Returns:
+            True if the method uses an atlas, False otherwise
+        """
+        method = getattr(self.config, 'method', None)
+        # Methods that do NOT use an atlas
+        non_atlas_methods = ['seedToVoxel', 'seedToSeed']
+        return method not in non_atlas_methods
+    
     def _figure_to_base64(self, fig: plt.Figure, dpi: int = 150) -> str:
         """Convert matplotlib figure to base64 PNG."""
         buffer = BytesIO()
@@ -852,12 +878,70 @@ class ParticipantReportGenerator:
         buffer.close()
         return img_data
     
-    def _save_figure_to_disk(self, fig: plt.Figure, filename: str, dpi: int = 150) -> Optional[Path]:
-        """Save figure to the figures directory.
+    def _build_bids_figure_filename(self, figure_type: str, desc: str) -> str:
+        """Build BIDS-compliant figure filename with all entities.
+        
+        Pattern: sub-<label>[_ses-<session>][_task-<task>][_space-<space>][_denoise-<method>]
+                 [_condition-<condition>][_method-<method>][_atlas-<atlas>][_desc-<desc>][_<figure_type>].<ext>
+        
+        Args:
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description (e.g., 'correlation', 'covariance')
+            
+        Returns:
+            BIDS-compliant filename like: sub-01_task-rest_condition-face_atlas-schaefer2018n100_desc-correlation_connectivity.png
+        """
+        # Extract subject ID from subject_id (which may be 'sub-01' or 'sub-01_ses-1_task-rest', etc.)
+        if self.subject_id.startswith('sub-'):
+            # Parse BIDS entities from subject_id
+            parts = self.subject_id.split('_')
+            sub_part = parts[0]  # sub-XX
+        else:
+            sub_part = f"sub-{self.subject_id}"
+        
+        # Build entity components in BIDS order
+        filename_parts = [sub_part]
+        
+        if self.session:
+            filename_parts.append(f"ses-{self.session}")
+        
+        if self.task:
+            filename_parts.append(f"task-{self.task}")
+        
+        if self.space:
+            filename_parts.append(f"space-{self.space}")
+        
+        # Add denoising strategy
+        if self.denoising_strategy and self.denoising_strategy != "none":
+            filename_parts.append(f"denoise-{self.denoising_strategy}")
+        
+        # Add condition (if present)
+        if self.condition:
+            filename_parts.append(f"condition-{self.condition}")
+        
+        # Add method (analysis type)
+        if hasattr(self.config, 'method') and self.config.method:
+            filename_parts.append(f"method-{self.config.method}")
+        
+        # Add atlas (only if method uses an atlas)
+        if self._method_uses_atlas() and hasattr(self.config, 'atlas') and self.config.atlas:
+            filename_parts.append(f"atlas-{self.config.atlas}")
+        
+        # Add description
+        if desc:
+            filename_parts.append(f"desc-{desc}")
+        
+        # Add figure type as suffix
+        base_filename = "_".join(filename_parts)
+        return f"{base_filename}_{figure_type}.png"
+    
+    def _save_figure_to_disk(self, fig: plt.Figure, figure_type: str, desc: str, dpi: int = 150) -> Optional[Path]:
+        """Save figure to the figures directory with BIDS-compliant filename.
         
         Args:
             fig: Matplotlib figure to save
-            filename: Filename for the saved figure (without path)
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description entity (e.g., 'correlation', 'covariance')
             dpi: Resolution for saving
             
         Returns:
@@ -868,6 +952,8 @@ class ParticipantReportGenerator:
         
         try:
             self.figures_dir.mkdir(parents=True, exist_ok=True)
+            # Build BIDS-compliant filename
+            filename = self._build_bids_figure_filename(figure_type, desc)
             fig_path = self.figures_dir / filename
             fig.savefig(fig_path, format='png', dpi=dpi, bbox_inches='tight',
                         facecolor='white', edgecolor='none')
@@ -987,7 +1073,7 @@ class ParticipantReportGenerator:
         """Add denoising information.
         
         Args:
-            confounds_df: Full confounds DataFrame from fMRIPrep
+            confounds_df: Full confounds DataFrame from preprocessing (fmridenoiser or fMRIPrep)
             confounds_used: List of confound columns used in denoising
         """
         self.confounds_df = confounds_df
@@ -1007,6 +1093,23 @@ class ParticipantReportGenerator:
                 - 'denoised_stats': Dict with mean, std, min, max
         """
         self.denoising_histogram_data = histogram_data
+    
+    def add_brain_map(
+        self,
+        brain_map_path: Union[str, Path],
+        label: str,
+        seed_coords: Optional[np.ndarray] = None,
+        seed_radius: Optional[float] = None
+    ) -> None:
+        """Add a brain map for visualization (seedToVoxel or roiToVoxel output).
+        
+        Args:
+            brain_map_path: Path to NIfTI brain map file (.nii or .nii.gz)
+            label: Label for the brain map (e.g., seed name, ROI name)
+            seed_coords: Optional seed coordinates [x, y, z] in mm for centered views
+            seed_radius: Optional seed sphere radius in mm for visualization overlay
+        """
+        self.brain_maps.append((Path(brain_map_path), label, seed_coords, seed_radius))
     
     def _build_header(self) -> str:
         """Build report header section."""
@@ -1081,11 +1184,15 @@ class ParticipantReportGenerator:
         method_desc = method_descriptions.get(self.config.method, self.config.method)
         
         # Determine atlas display value for overview
-        atlas_overview = getattr(self.config, 'atlas', 'N/A')
-        if atlas_overview and atlas_overview != 'N/A':
-            standard_atlases = ['schaefer2018n100', 'schaefer2018n200', 'aal', 'harvardoxford', 'canica']
-            if atlas_overview.lower() not in [a.lower() for a in standard_atlases]:
-                atlas_overview = f"{atlas_overview} (custom)"
+        # Only display atlas if the method uses an atlas
+        if self._method_uses_atlas():
+            atlas_overview = getattr(self.config, 'atlas', 'N/A')
+            if atlas_overview and atlas_overview != 'N/A':
+                standard_atlases = ['schaefer2018n100', 'schaefer2018n200', 'aal', 'harvardoxford', 'canica']
+                if atlas_overview.lower() not in [a.lower() for a in standard_atlases]:
+                    atlas_overview = f"{atlas_overview} (custom)"
+        else:
+            atlas_overview = 'N/A'
         
         html = f'''
         <div class="section" id="overview">
@@ -1096,18 +1203,7 @@ class ParticipantReportGenerator:
                     <div class="metric-value">{self.config.method}</div>
                     <div class="metric-label">Analysis Method</div>
                 </div>
-                <div class="metric-card">
-                    <div class="metric-value">{atlas_overview}</div>
-                    <div class="metric-label">Atlas</div>
-                </div>
-                <div class="metric-card">
-                    <div class="metric-value">{self.config.high_pass:.3f}</div>
-                    <div class="metric-label">High-pass (Hz)</div>
-                </div>
-                <div class="metric-card">
-                    <div class="metric-value">{self.config.low_pass:.3f}</div>
-                    <div class="metric-label">Low-pass (Hz)</div>
-                </div>
+                {f'<div class="metric-card"><div class="metric-value">{atlas_overview}</div><div class="metric-label">Atlas</div></div>' if self._method_uses_atlas() else ''}
             </div>
             
             <h3>Method Description</h3>
@@ -1115,8 +1211,8 @@ class ParticipantReportGenerator:
             
             <div class="alert alert-info">
                 <span class="alert-icon">ℹ️</span>
-                <div>This analysis computes functional connectivity from preprocessed 
-                fMRI data using confound regression and temporal filtering.</div>
+                <div>This analysis computes functional connectivity from denoised 
+                fMRI data produced by fmridenoiser.</div>
             </div>
         </div>
         '''
@@ -1126,13 +1222,10 @@ class ParticipantReportGenerator:
         """Build analysis parameters section."""
         self.toc_items.append(("parameters", "Analysis Parameters"))
         
-        # Preprocessing parameters
+        # Preprocessing parameters (from upstream denoising by fmridenoiser)
         preproc_params = [
-            ("High-pass filter", f"{self.config.high_pass} Hz"),
-            ("Low-pass filter", f"{self.config.low_pass} Hz"),
-            ("Confounds", ", ".join(self.config.confounds[:5]) + ("..." if len(self.config.confounds) > 5 else "")),
-            ("Standardize", "True"),
-            ("Detrend", "True"),
+            ("Preprocessed by", "fmridenoiser"),
+            ("Analysis type", "consumes denoised data"),
         ]
         
         preproc_rows = ""
@@ -1260,155 +1353,34 @@ class ParticipantReportGenerator:
         return html
     
     def _build_confounds_section(self) -> str:
-        """Build confounds/denoising section."""
-        self.toc_items.append(("denoising", "Denoising"))
-        
-        confounds_list = "</li><li>".join(self.config.confounds)
-        n_confounds = len(self.config.confounds)
-        
-        # Check if a predefined denoising strategy was used
-        strategy_name = getattr(self.config, 'denoising_strategy', None)
-        
-        # Build strategy info card if applicable
-        strategy_card = ""
-        if strategy_name:
-            strategy_card = f'''
-                <div class="metric-card">
-                    <div class="metric-value" style="font-size: 1.2rem;">{strategy_name}</div>
-                    <div class="metric-label">Predefined Strategy</div>
-                </div>
-            '''
+        """Build preprocessing note section (denoising done upstream)."""
+        self.toc_items.append(("preprocessing", "Preprocessing"))
         
         html = f'''
-        <div class="section" id="denoising">
-            <h2>🧹 Denoising Strategy</h2>
+        <div class="section" id="preprocessing">
+            <h2>🔧 Preprocessing</h2>
             
-            <div class="metrics-grid">
-                {strategy_card}
-                <div class="metric-card">
-                    <div class="metric-value">{n_confounds}</div>
-                    <div class="metric-label">Confound Regressors</div>
+            <div class="alert alert-info">
+                <span class="alert-icon">ℹ️</span>
+                <div>
+                    <strong>Note:</strong> This analysis uses denoised fMRI data preprocessed
+                    by <strong>fmridenoiser</strong>. Confound regression, temporal filtering,
+                    and motion censoring were applied during the upstream denoising step.
                 </div>
             </div>
             
-            <h3>Confounds Used</h3>
-            <ul>
-                <li>{confounds_list}</li>
-            </ul>
+            <h3>Preprocessing Pipeline</h3>
+            <ol>
+                <li>fMRI preprocessing by fMRIPrep</li>
+                <li>Confound regression and denoising by fmridenoiser</li>
+                <li>Connectivity analysis by Connectomix</li>
+            </ol>
             
-            <p>These confounds were regressed from the BOLD signal before computing 
-            connectivity. The signal was also bandpass filtered between 
-            {self.config.high_pass} and {self.config.low_pass} Hz.</p>
+            <p>For detailed information about confounds and preprocessing parameters used,
+            please refer to the fmridenoiser output in the derivatives directory.</p>
+        </div>
         '''
         
-        # Add denoising plot if we have confounds data
-        if self.confounds_df is not None and len(self.confounds_used) > 0:
-            fig = self._create_confounds_plot()
-            if fig is not None:
-                fig_id = self._get_unique_figure_id()
-                img_data = self._figure_to_base64(fig)
-                
-                # Save figure to disk
-                self._save_figure_to_disk(fig, 'confounds_timeseries.png')
-                
-                plt.close(fig)
-                
-                html += f'''
-                <h3>Confound Time Series</h3>
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{fig_id}', 'confounds_timeseries.png')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: Time series of confound regressors used for denoising. 
-                        Values are z-scored for visualization.
-                    </div>
-                </div>
-                '''
-            
-            # Add confounds correlation matrix
-            corr_fig, corr_df = self._create_confounds_correlation_plot()
-            if corr_fig is not None:
-                corr_fig_id = self._get_unique_figure_id()
-                corr_img_data = self._figure_to_base64(corr_fig)
-                
-                # Build BIDS-compliant filename
-                bids_base = self._build_bids_base_filename()
-                corr_fig_filename = f"{bids_base}_confounds-correlation.png"
-                corr_npy_filename = f"{bids_base}_confounds-correlation.npy"
-                
-                # Save figure to figures dir
-                self._save_figure_to_disk(corr_fig, corr_fig_filename)
-                
-                # Save correlation matrix as .npy to connectivity_data dir
-                if corr_df is not None:
-                    self._save_matrix_to_disk(
-                        corr_df.values,
-                        corr_npy_filename,
-                        labels=list(corr_df.columns),
-                        description="Pearson correlation matrix between confound regressors"
-                    )
-                
-                plt.close(corr_fig)
-                
-                html += f'''
-                <h3>Confound Inter-Correlations</h3>
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{corr_fig_id}" src="data:image/png;base64,{corr_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{corr_fig_id}', '{corr_fig_filename}')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: Pearson correlation matrix between confound regressors. 
-                        High correlations between confounds may indicate redundancy in the denoising strategy.
-                    </div>
-                </div>
-                '''
-        
-        # Add denoising histogram if available
-        if self.denoising_histogram_data is not None:
-            hist_fig = self._create_denoising_histogram_plot()
-            if hist_fig is not None:
-                hist_fig_id = self._get_unique_figure_id()
-                hist_img_data = self._figure_to_base64(hist_fig, dpi=150)
-                
-                bids_base = self._build_bids_base_filename()
-                hist_filename = f"{bids_base}_denoising-histogram.png"
-                self._save_figure_to_disk(hist_fig, hist_filename, dpi=150)
-                plt.close(hist_fig)
-                
-                # Get stats for caption
-                orig_stats = self.denoising_histogram_data['original_stats']
-                den_stats = self.denoising_histogram_data['denoised_stats']
-                
-                html += f'''
-                <h3>Denoising Effect on Signal Distribution</h3>
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{hist_fig_id}" src="data:image/png;base64,{hist_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{hist_fig_id}', '{hist_filename}')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: Histogram of all voxel intensity values across all timepoints, before (blue) 
-                        and after (coral) denoising. <strong>Note:</strong> For visualization purposes, 
-                        the before-denoising data has been z-scored to allow comparison on the same scale 
-                        (raw BOLD values are typically ~1000). After denoising, confound regression, 
-                        bandpass filtering, and standardization are applied, which changes the distribution shape.
-                        <br><br>
-                        <strong>Statistics (z-scored):</strong> Before: μ={orig_stats['mean']:.2f}, σ={orig_stats['std']:.2f}. 
-                        After: μ={den_stats['mean']:.2f}, σ={den_stats['std']:.2f}.
-                    </div>
-                </div>
-                '''
-        
-        html += "</div>"
         return html
     
     def _create_confounds_plot(self) -> Optional[plt.Figure]:
@@ -1562,18 +1534,17 @@ class ParticipantReportGenerator:
             return None
     
     def _build_censoring_section(self) -> str:
-        """Build temporal censoring section."""
+        """Build temporal masking section."""
         if self.censoring_summary is None or not self.censoring_summary.get('enabled', False):
             return ""
         
-        self.toc_items.append(("censoring", "Temporal Censoring"))
+        self.toc_items.append(("censoring", "Temporal Masking"))
         
         summary = self.censoring_summary
         n_original = summary.get('n_original', 0)
         n_retained = summary.get('n_retained', 0)
         n_censored = summary.get('n_censored', 0)
         fraction = summary.get('fraction_retained', 1.0)
-        reason_counts = summary.get('reason_counts', {})
         
         # Determine retention status color
         if fraction < 0.5:
@@ -1586,46 +1557,18 @@ class ParticipantReportGenerator:
             status_class = "badge-success"
             status_text = "Good Retention"
         
-        # Check if this is condition-based censoring
+        # Check if this is condition-based masking
         conditions = summary.get('conditions', {})
         has_conditions = len(conditions) > 0
         
-        # Description text varies based on censoring type
-        if has_conditions:
-            description = '''Temporal censoring was applied to select specific task conditions. 
-            Connectivity was computed separately for each condition using only the timepoints 
-            belonging to that condition.'''
-            retained_label = "Volumes Used (union of conditions)"
-        else:
-            description = '''Temporal censoring removes specific timepoints (volumes) from the fMRI data 
-            before connectivity analysis. This is useful for excluding high-motion frames 
-            or initial equilibration volumes.'''
-            retained_label = "Retained Volumes"
-        
-        # Check for warnings in the summary
-        warnings = summary.get('warnings', [])
-        warning_html = ""
-        if warnings:
-            warning_items = "".join(f"<li>{w}</li>" for w in warnings)
-            warning_html = f'''
-            <div class="warning-banner" style="background-color: #fef3c7; border: 2px solid #f59e0b; border-radius: 8px; padding: 16px; margin-bottom: 20px;">
-                <h3 style="color: #92400e; margin-top: 0;">⚠️ DATA QUALITY WARNING</h3>
-                <p style="color: #92400e; font-weight: bold;">The following issues were detected during temporal censoring:</p>
-                <ul style="color: #92400e; margin-bottom: 0;">
-                    {warning_items}
-                </ul>
-                <p style="color: #92400e; margin-bottom: 0; margin-top: 12px;">
-                    <strong>Recommendation:</strong> Results from analyses with very few volumes may be unreliable. 
-                    Consider relaxing censoring parameters, excluding problematic conditions, or interpreting these results with extreme caution.
-                </p>
-            </div>
-            '''
+        # Description for condition-based masking
+        description = '''Temporal masking selects specific task conditions for analysis. 
+        Connectivity was computed separately for each condition using only the timepoints 
+        belonging to that condition. Motion artifacts were removed during the denoising phase.'''
         
         html = f'''
         <div class="section" id="censoring">
-            <h2>⏱️ Temporal Censoring</h2>
-            
-            {warning_html}
+            <h2>⏱️ Temporal Masking</h2>
             
             <p>{description}</p>
             
@@ -1636,11 +1579,11 @@ class ParticipantReportGenerator:
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">{n_retained}</div>
-                    <div class="metric-label">{retained_label}</div>
+                    <div class="metric-label">Volumes in Conditions</div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">{n_censored}</div>
-                    <div class="metric-label">Excluded Volumes</div>
+                    <div class="metric-label">Not in Conditions</div>
                 </div>
                 <div class="metric-card">
                     <div class="metric-value">{fraction:.1%}</div>
@@ -1649,65 +1592,11 @@ class ParticipantReportGenerator:
             </div>
         '''
         
-        # Censoring reasons breakdown (only if there are reasons from global censoring)
-        if reason_counts:
-            html += '''
-            <h3>Censoring Breakdown</h3>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Reason</th>
-                        <th>Volumes Censored</th>
-                    </tr>
-                </thead>
-                <tbody>
-            '''
-            
-            reason_labels = {
-                'initial_drop': 'Initial volume drop (dummy scans)',
-                'custom_mask': 'Custom censoring mask',
-            }
-            
-            for reason, count in sorted(reason_counts.items()):
-                # Format reason for display
-                if reason.startswith('motion_fd>'):
-                    fd_thresh = reason.replace('motion_fd>', '')
-                    # fd_thresh may include a unit (e.g. '0.5cm') or be numeric
-                    try:
-                        # Try parse numeric part and show both cm and mm
-                        if fd_thresh.endswith('cm'):
-                            val = float(fd_thresh[:-2])
-                            mm_val = val * 10.0
-                            label = f'Motion censoring (FD > {val} cm ({mm_val:.2f} mm))'
-                        else:
-                            val = float(fd_thresh)
-                            mm_val = val * 10.0
-                            label = f'Motion censoring (FD > {val} cm ({mm_val:.2f} mm))'
-                    except Exception:
-                        # Fallback: display raw string
-                        label = f'Motion censoring (FD > {fd_thresh})'
-                else:
-                    label = reason_labels.get(reason, reason)
-                
-                html += f'''
-                    <tr>
-                        <td>{label}</td>
-                        <td>{count}</td>
-                    </tr>
-                '''
-            
-            html += '''
-                </tbody>
-            </table>
-            '''
-        
         # Condition-specific breakdown
-        conditions = summary.get('conditions', {})
         if conditions:
             html += '''
             <h3>Condition-Specific Volumes</h3>
-            <p>Connectivity was computed separately for each condition using only 
-            the timepoints belonging to that condition:</p>
+            <p>Connectivity was computed separately for each condition:</p>
             <table>
                 <thead>
                     <tr>
@@ -1736,26 +1625,28 @@ class ParticipantReportGenerator:
             </table>
             '''
         
-        # Create censoring visualization
-        censor_fig = self._create_censoring_plot()
-        if censor_fig is not None:
+        # Create temporal masking figure
+        masking_fig = self._create_temporal_masking_figure()
+        if masking_fig is not None:
             fig_id = self._get_unique_figure_id()
-            img_data = self._figure_to_base64(censor_fig)
-            self._save_figure_to_disk(censor_fig, 'temporal_censoring.png')
-            plt.close(censor_fig)
+            img_data = self._figure_to_base64(masking_fig)
+            saved_masking_path = self._save_figure_to_disk(masking_fig, 'masking', 'temporal')
+            actual_masking_filename = saved_masking_path.name if saved_masking_path else 'temporal_masking.png'
+            plt.close(masking_fig)
             
             html += f'''
-            <h3>Censoring Mask Visualization</h3>
+            <h3>Temporal Masking Visualization</h3>
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'temporal_censoring.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_masking_filename}')">
                         ⬇️ Download
                     </button>
                 </div>
                 <div class="figure-caption">
-                    Figure: Temporal censoring masks showing which volumes are used for connectivity analysis.
-                    See legend for color coding.
+                    Figure: Temporal masking visualization showing retained (green) and masked (red) volumes.
+                    Green bars (#10b981) represent the {n_retained} included volumes.
+                    Red bars (#ef4444) represent the {n_censored} excluded volumes.
                 </div>
             </div>
             '''
@@ -1764,150 +1655,85 @@ class ParticipantReportGenerator:
         return html
     
     def _create_censoring_plot(self) -> Optional[plt.Figure]:
-        """Create temporal censoring visualization.
+        """Create temporal censoring visualization for condition-based masking.
         
-        When condition selection is active, shows a multi-row plot with:
-        1. Global censoring mask (motion, initial drop, etc.)
-        2. Each condition's mask
-        3. Combined/union mask
-        Otherwise shows the global censoring mask only.
+        Shows condition-specific masks only. Motion artifacts are handled during denoising.
         """
         if self.censoring_summary is None:
             return None
         
         try:
             conditions = self.censoring_summary.get('conditions', {})
-            global_mask = np.array(self.censoring_summary.get('mask', []))
-            global_censoring = self.censoring_summary.get('global_censoring', {})
+            mask = np.array(self.censoring_summary.get('mask', []), dtype=bool)
             
-            if len(global_mask) == 0:
+            if len(mask) == 0:
                 return None
             
-            n_volumes = len(global_mask)
+            n_volumes = len(mask)
             
-            # If conditions exist, show global + condition-specific masks
+            # Show condition-specific masks
             if conditions:
-                # Create multi-row figure: global + conditions + combined
-                n_rows = len(conditions) + 2  # +1 for global, +1 for combined
-                fig, axes = plt.subplots(n_rows, 1, figsize=(14, 1.5 * n_rows), 
-                                        sharex=True, squeeze=False)
+                # Create multi-row figure: one row per condition
+                n_rows = len(conditions)
+                figsize = (14, 1.5 * n_rows) if n_rows > 1 else (14, 2)
+                fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True, squeeze=False)
                 axes = axes.flatten()
                 
-                # Row 0: Global censoring mask (motion, initial drop)
-                ax = axes[0]
-                colors = np.zeros((1, n_volumes, 3))
-                colors[0, global_mask, :] = [0.3, 0.7, 0.9]   # Light blue for passed global
-                colors[0, ~global_mask, :] = [0.5, 0.5, 0.5]  # Gray for globally censored
-                
-                ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
-                ax.set_yticks([])
-                ax.set_ylabel('Global\n(motion)', fontsize=9, rotation=0, ha='right', va='center')
-                
-                global_retained = global_censoring.get('n_retained', int(np.sum(global_mask)))
-                global_frac = global_censoring.get('fraction_retained', global_retained/n_volumes)
-                ax.text(n_volumes * 0.98, 0.5, f'{global_retained}/{n_volumes} ({global_frac:.1%})',
-                       ha='right', va='center', fontsize=8,
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
-                ax.set_title('Temporal Censoring Masks', fontsize=12, fontweight='bold')
-                
-                # Calculate combined mask (intersection of condition with global)
-                combined_mask = np.zeros(n_volumes, dtype=bool)
-                
-                # Rows 1 to N: Plot each condition
+                # Plot each condition
                 for idx, (cond_name, cond_info) in enumerate(sorted(conditions.items())):
-                    ax = axes[idx + 1]  # Offset by 1 for global row
+                    ax = axes[idx]
                     
-                    # Get the raw condition timing (before global mask intersection)
-                    raw_mask_data = cond_info.get('raw_mask', None)
-                    effective_mask_data = cond_info.get('mask', None)
+                    # Get condition mask if available
+                    cond_mask = cond_info.get('mask', np.zeros(n_volumes, dtype=bool))
+                    if isinstance(cond_mask, list):
+                        cond_mask = np.array(cond_mask, dtype=bool)
                     
-                    if raw_mask_data is not None:
-                        raw_cond_mask = np.array(raw_mask_data, dtype=bool)
-                    elif effective_mask_data is not None:
-                        # Fallback: use effective mask if raw not available
-                        raw_cond_mask = np.array(effective_mask_data, dtype=bool)
-                    else:
-                        # Last resort fallback
-                        n_vols = cond_info.get('n_volumes', 0)
-                        raw_cond_mask = np.zeros(n_volumes, dtype=bool)
-                        raw_cond_mask[:n_vols] = True
-                    
-                    # The effective mask is the intersection of raw condition AND global
-                    effective_mask = raw_cond_mask & global_mask
-                    n_effective = int(np.sum(effective_mask))
-                    effective_frac = n_effective / n_volumes
-                    
-                    # Create colors showing:
-                    # - Green: in condition AND passed global (actually used)
-                    # - Orange: in condition BUT failed global (would be used but censored)
-                    # - Light gray: not in condition
+                    # Create colors: green for in condition, gray for not
                     colors = np.zeros((1, n_volumes, 3))
-                    colors[0, :, :] = [0.85, 0.85, 0.85]  # Default: light gray (not in condition)
-                    colors[0, raw_cond_mask & ~global_mask, :] = [1.0, 0.6, 0.2]  # Orange: in condition but censored
-                    colors[0, effective_mask, :] = [0.2, 0.8, 0.2]  # Green: actually used
+                    colors[0, cond_mask, :] = [0.1, 0.7, 0.5]   # Green for in condition
+                    colors[0, ~cond_mask, :] = [0.85, 0.85, 0.85]  # Gray for not in condition
                     
                     ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
                     ax.set_yticks([])
-                    ax.set_ylabel(f'{cond_name}', fontsize=9, rotation=0, ha='right', va='center')
-                    ax.text(n_volumes * 0.98, 0.5, f'{n_effective}/{n_volumes} ({effective_frac:.1%})',
-                           ha='right', va='center', fontsize=8,
-                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                    ax.set_ylabel(f'{cond_name}', fontsize=10, rotation=0, ha='right', va='center', fontweight='bold')
                     
-                    # Combined is union of effective masks (what's actually used)
-                    combined_mask |= effective_mask
+                    # Add stats
+                    n_cond = int(np.sum(cond_mask))
+                    frac_cond = n_cond / n_volumes if n_volumes > 0 else 0
+                    ax.text(n_volumes * 0.98, 0.5, f'{n_cond}/{n_volumes} ({frac_cond:.1%})',
+                           ha='right', va='center', fontsize=9,
+                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
                 
-                # Last row: Show combined/union mask (what's actually used across all conditions)
-                ax = axes[-1]
-                colors = np.zeros((1, n_volumes, 3))
-                colors[0, combined_mask, :] = [0.2, 0.6, 0.9]   # Blue for actually used
-                colors[0, ~combined_mask, :] = [0.9, 0.2, 0.2]  # Red for excluded
-                
-                ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
-                ax.set_xlabel('Volume', fontsize=10)
-                ax.set_yticks([])
-                ax.set_ylabel('Combined', fontsize=9, rotation=0, ha='right', va='center')
-                
-                # Get actual combined stats from summary
-                total_retained = self.censoring_summary.get('n_retained', int(np.sum(combined_mask)))
-                frac_retained = self.censoring_summary.get('fraction_retained', total_retained/n_volumes)
-                ax.text(n_volumes * 0.98, 0.5, f'{total_retained}/{n_volumes} ({frac_retained:.1%})',
-                       ha='right', va='center', fontsize=8,
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                # Set labels
+                axes[-1].set_xlabel('Volume', fontsize=11, fontweight='bold')
+                axes[0].set_title('Temporal Masking by Condition', fontsize=13, fontweight='bold')
                 
                 # Add legend
                 from matplotlib.patches import Patch
                 legend_elements = [
-                    Patch(facecolor=[0.3, 0.7, 0.9], label='Passed motion check'),
-                    Patch(facecolor=[0.5, 0.5, 0.5], label='Failed motion check'),
-                    Patch(facecolor=[0.2, 0.8, 0.2], label='Used (in condition + passed motion)'),
-                    Patch(facecolor=[1.0, 0.6, 0.2], label='In condition but censored (motion)'),
-                    Patch(facecolor=[0.85, 0.85, 0.85], label='Not in condition'),
-                    Patch(facecolor=[0.2, 0.6, 0.9], label='Combined (any condition used)'),
-                    Patch(facecolor=[0.9, 0.2, 0.2], label='Excluded'),
+                    Patch(facecolor=[0.1, 0.7, 0.5], label='In Condition'),
+                    Patch(facecolor=[0.85, 0.85, 0.85], label='Not in Condition'),
                 ]
-                fig.legend(handles=legend_elements, loc='upper right', fontsize=7, 
-                          bbox_to_anchor=(0.99, 0.99), ncol=2)
+                fig.legend(handles=legend_elements, loc='upper right', fontsize=10,
+                          bbox_to_anchor=(0.99, 0.99))
                 
             else:
-                # Simple global mask plot
+                # Fallback: show simple binary mask
                 fig, ax = plt.subplots(figsize=(14, 2))
-                
-                # Create image representation of mask
                 colors = np.zeros((1, n_volumes, 3))
-                colors[0, global_mask, :] = [0.2, 0.8, 0.2]   # Green for retained
-                colors[0, ~global_mask, :] = [0.9, 0.2, 0.2]  # Red for censored
+                colors[0, mask, :] = [0.1, 0.7, 0.5]   # Green for retained
+                colors[0, ~mask, :] = [0.9, 0.2, 0.2]  # Red for masked
                 
                 ax.imshow(colors, aspect='auto', extent=[0, n_volumes, 0, 1])
-                ax.set_xlabel('Volume', fontsize=10)
+                ax.set_xlabel('Volume', fontsize=11, fontweight='bold')
                 ax.set_yticks([])
                 ax.set_xlim(0, n_volumes)
-                ax.set_title('Temporal Censoring Mask', fontsize=12, fontweight='bold')
+                ax.set_title('Temporal Masking', fontsize=13, fontweight='bold')
                 
-                # Add text summary
-                n_retained = np.sum(global_mask)
+                n_retained = int(np.sum(mask))
                 ax.text(n_volumes * 0.98, 0.5, f'{n_retained}/{n_volumes} retained',
-                       ha='right', va='center', fontsize=9,
-                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+                       ha='right', va='center', fontsize=10,
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
             
             plt.tight_layout()
             return fig
@@ -1915,6 +1741,140 @@ class ParticipantReportGenerator:
         except Exception as e:
             logger.warning(f"Could not create censoring plot: {e}")
             return None
+    
+    def _create_temporal_masking_figure(self) -> Optional[plt.Figure]:
+        """Create temporal masking visualization with specified design.
+        
+        Generates a figure showing retained vs. masked volumes using:
+        - Green (#10b981) for retained volumes
+        - Red (#ef4444) for masked volumes
+        - 14" × variable height figure (1 row if no conditions, multiple if conditions)
+        - axvspan() rendering with semi-transparent fill (alpha=0.7)
+        - No y-axis ticks (categorical visualization)
+        """
+        if self.censoring_summary is None:
+            return None
+        
+        try:
+            mask = np.array(self.censoring_summary.get('mask', []), dtype=bool)
+            conditions = self.censoring_summary.get('conditions', {})
+            
+            if len(mask) == 0:
+                return None
+            
+            n_volumes = len(mask)
+            
+            # Define colors
+            color_retained = '#10b981'    # Green for retained
+            color_masked = '#ef4444'      # Red for masked
+            alpha = 0.7                   # Semi-transparent fill
+            
+            # If conditions exist, show multiple rows (one per condition)
+            if conditions:
+                n_rows = len(conditions)
+                figsize = (14, 1.5 * n_rows) if n_rows > 1 else (14, 2.5)
+                fig, axes = plt.subplots(n_rows, 1, figsize=figsize, sharex=True, squeeze=False)
+                axes = axes.flatten()
+                
+                # Plot each condition
+                for idx, (cond_name, cond_info) in enumerate(sorted(conditions.items())):
+                    ax = axes[idx]
+                    cond_mask = np.array(cond_info.get('mask', []), dtype=bool)
+                    
+                    # Use axvspan() for each contiguous region
+                    i = 0
+                    while i < n_volumes:
+                        current_status = cond_mask[i]
+                        start = i
+                        
+                        # Find consecutive volumes with same status
+                        while i < n_volumes and cond_mask[i] == current_status:
+                            i += 1
+                        
+                        # Draw span for this group
+                        color = color_retained if current_status else color_masked
+                        ax.axvspan(start - 0.5, i - 0.5, alpha=alpha, color=color, linewidth=0)
+                    
+                    # Styling
+                    ax.set_xlim(-0.5, n_volumes - 0.5)
+                    ax.set_ylim(0, 1)
+                    ax.set_yticks([])
+                    ax.set_ylabel(cond_name, fontsize=11, fontweight='bold', rotation=0, ha='right', va='center')
+                    
+                    # Stats
+                    n_cond = int(np.sum(cond_mask))
+                    ax.text(n_volumes * 0.98, 0.5, f'{n_cond}/{n_volumes}',
+                           ha='right', va='center', fontsize=9,
+                           bbox=dict(boxstyle='round', facecolor='white', alpha=0.85))
+                
+                # Labels
+                axes[-1].set_xlabel('Volume', fontsize=12, fontweight='bold')
+                axes[0].set_title('Temporal Masking by Condition', fontsize=13, fontweight='bold')
+                
+                # Legend
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor=color_retained, alpha=alpha, label='In Condition'),
+                    Patch(facecolor=color_masked, alpha=alpha, label='Not in Condition'),
+                ]
+                fig.legend(handles=legend_elements, loc='upper right', fontsize=10,
+                          bbox_to_anchor=(0.99, 0.99))
+                
+            else:
+                # Single plot: combined mask or global
+                fig, ax = plt.subplots(figsize=(14, 2.5))
+                
+                # Use axvspan() for each volume interval
+                i = 0
+                while i < n_volumes:
+                    current_status = mask[i]
+                    start = i
+                    
+                    # Find consecutive volumes with same status
+                    while i < n_volumes and mask[i] == current_status:
+                        i += 1
+                    
+                    # Draw span for this group
+                    color = color_retained if current_status else color_masked
+                    ax.axvspan(start - 0.5, i - 0.5, alpha=alpha, color=color, linewidth=0)
+                
+                # Set axis properties
+                ax.set_xlim(-0.5, n_volumes - 0.5)
+                ax.set_ylim(0, 1)
+                ax.set_xlabel('Volume', fontsize=12, fontweight='bold')
+                ax.set_yticks([])  # No y-axis ticks (categorical, not quantitative)
+                ax.set_xticks([0, n_volumes // 4, n_volumes // 2, 3 * n_volumes // 4, n_volumes - 1])
+                ax.grid(axis='x', alpha=0.2, linestyle='--', linewidth=0.5)
+                
+                # Add statistics text
+                n_retained = np.sum(mask)
+                n_masked = n_volumes - n_retained
+                pct_retained = 100.0 * n_retained / n_volumes
+                
+                # Title with statistics
+                title_text = f'Temporal Masking: {n_retained}/{n_volumes} volumes retained ({pct_retained:.1f}%)'
+                ax.set_title(title_text, fontsize=13, fontweight='bold', pad=10)
+                
+                # Add a subtle frame
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['left'].set_visible(False)
+                
+                # Add legend
+                from matplotlib.patches import Patch
+                legend_elements = [
+                    Patch(facecolor=color_retained, alpha=alpha, label=f'Retained ({n_retained})'),
+                    Patch(facecolor=color_masked, alpha=alpha, label=f'Masked ({n_masked})')
+                ]
+                ax.legend(handles=legend_elements, loc='upper right', fontsize=10, framealpha=0.95)
+            
+            plt.tight_layout()
+            return fig
+            
+        except Exception as e:
+            logger.warning(f"Could not create temporal masking figure: {e}")
+            return None
+    
     
     def _build_connectivity_section(self) -> str:
         """Build connectivity results section."""
@@ -2015,9 +1975,17 @@ class ParticipantReportGenerator:
                 fig_id = self._get_unique_figure_id()
                 img_data = self._figure_to_base64(fig, dpi=150)
                 
-                # Save figure to disk
-                fig_filename = f"connectivity_{name}.png"
-                self._save_figure_to_disk(fig, fig_filename, dpi=150)
+                # Save figure to disk with BIDS-compliant name
+                # Map connectivity type names to BIDS-friendly descriptions
+                desc_map = {
+                    'correlation': 'correlation',
+                    'covariance': 'covariance',
+                    'partial correlation': 'partial-correlation',
+                    'precision': 'precision'
+                }
+                desc = desc_map.get(connectivity_type, connectivity_type.replace(' ', '-'))
+                saved_fig_path = self._save_figure_to_disk(fig, 'connectivity', desc, dpi=150)
+                actual_fig_filename = saved_fig_path.name if saved_fig_path else 'connectivity.png'
                 
                 plt.close(fig)
                 
@@ -2079,7 +2047,7 @@ class ParticipantReportGenerator:
                 <div class="figure-container">
                     <div class="figure-wrapper">
                         <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{fig_id}', 'connectivity_{name}.png')">
+                        <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_fig_filename}')">
                             ⬇️ Download
                         </button>
                     </div>
@@ -2091,44 +2059,22 @@ class ParticipantReportGenerator:
                 </div>
                 '''
                 
-                # Create and add connectome glass brain plot
-                connectome_fig = self._create_connectome_plot(matrix, connectivity_type)
-                if connectome_fig is not None:
-                    connectome_fig_id = self._get_unique_figure_id()
-                    connectome_img_data = self._figure_to_base64(connectome_fig, dpi=150)
-                    connectome_filename = f"connectome_{name}.png"
-                    self._save_figure_to_disk(connectome_fig, connectome_filename, dpi=150)
-                    plt.close(connectome_fig)
-                    
-                    html += f'''
-                <div class="figure-container">
-                    <div class="figure-wrapper">
-                        <img id="{connectome_fig_id}" src="data:image/png;base64,{connectome_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{connectome_fig_id}', '{connectome_filename}')">
-                            ⬇️ Download
-                        </button>
-                    </div>
-                    <div class="figure-caption">
-                        Figure: {display_name} connectome visualization (glass brain, axial view).
-                        Shows the strongest 20% of connections between brain regions.
-                    </div>
-                </div>
-                '''
-                
                 # Create and add histogram
                 hist_fig = self._create_connectivity_histogram(matrix, name, connectivity_type)
                 if hist_fig is not None:
                     hist_fig_id = self._get_unique_figure_id()
                     hist_img_data = self._figure_to_base64(hist_fig, dpi=150)
-                    hist_filename = f"histogram_{name}.png"
-                    self._save_figure_to_disk(hist_fig, hist_filename, dpi=150)
+                    # Save with BIDS-compliant name (append "histogram" to description)
+                    hist_desc = f"{desc}-histogram"
+                    saved_hist_path = self._save_figure_to_disk(hist_fig, 'histogram', hist_desc, dpi=150)
+                    actual_hist_filename = saved_hist_path.name if saved_hist_path else 'histogram.png'
                     plt.close(hist_fig)
                     
                     html += f'''
                 <div class="figure-container">
                     <div class="figure-wrapper">
                         <img id="{hist_fig_id}" src="data:image/png;base64,{hist_img_data}">
-                        <button class="download-btn" onclick="downloadFigure('{hist_fig_id}', '{hist_filename}')">
+                        <button class="download-btn" onclick="downloadFigure('{hist_fig_id}', '{actual_hist_filename}')">
                             ⬇️ Download
                         </button>
                     </div>
@@ -2275,105 +2221,172 @@ class ParticipantReportGenerator:
             logger.warning(f"Could not create connectivity histogram: {e}")
             return None
     
-    def _create_connectome_plot(
-        self,
-        matrix: np.ndarray,
-        connectivity_type: Optional[str] = None
-    ) -> Optional[plt.Figure]:
-        """Create connectome glass brain plot using nilearn.
+
+    def _build_brain_maps_section(self) -> str:
+        """Build brain maps visualization section for seedToVoxel and roiToVoxel."""
+        if not self.brain_maps:
+            return ""
         
-        Args:
-            matrix: Connectivity matrix (N x N).
-            connectivity_type: Type of connectivity measure.
+        self.toc_items.append(("brain_maps", "Brain Maps"))
+        
+        html = '''
+        <div class="section" id="brain_maps">
+            <h2>🧠 Brain Maps</h2>
+            <p>Axial slices showing voxel-wise connectivity strength for each seed/ROI. 
+            Lighter colors indicate stronger connectivity (in either positive or negative direction).
+            Green overlay indicates the seed region (sphere) or ROI region (mask boundary).</p>
+        '''
+        
+        for item in self.brain_maps:
+            # Handle different tuple formats for backward compatibility
+            if len(item) == 4:
+                brain_map_path, label, seed_coords, seed_radius = item
+            elif len(item) == 3:
+                brain_map_path, label, seed_coords = item
+                seed_radius = None
+            else:
+                brain_map_path, label = item
+                seed_coords = None
+                seed_radius = None
             
-        Returns:
-            Matplotlib figure with glass brain plot, or None if failed.
-        """
-        try:
-            from nilearn import plotting
-            from nilearn.plotting import find_parcellation_cut_coords
-            
-            # Get atlas coordinates - need to load the atlas first
-            if not hasattr(self.config, 'atlas') or not self.config.atlas:
-                logger.warning("No atlas specified, cannot create connectome plot")
-                return None
-            
-            atlas_name = self.config.atlas
-            
-            # Load atlas based on naming convention (same logic as participant.py)
             try:
-                if atlas_name.startswith("schaefer2018"):
-                    from nilearn.datasets import fetch_atlas_schaefer_2018
-                    if "n" in atlas_name:
-                        n_rois = int(atlas_name.split("n")[1])
+                # Try to read cut_coords from metadata sidecar
+                cut_coords_from_metadata = None
+                json_path = brain_map_path.with_suffix('.json')
+                if json_path.exists():
+                    try:
+                        import json
+                        with open(json_path, 'r') as f:
+                            metadata = json.load(f)
+                        # Try ROI center-of-mass first, then seed coordinates
+                        if 'ROI_CenterOfMass_mm' in metadata:
+                            cut_coords_from_metadata = tuple(metadata['ROI_CenterOfMass_mm'])
+                        elif 'SeedCenterCoords_mm' in metadata:
+                            cut_coords_from_metadata = tuple(metadata['SeedCenterCoords_mm'])
+                    except Exception as json_error:
+                        self._logger.debug(f"Could not read metadata from {json_path}: {json_error}")
+                
+                # Check if a pre-computed PNG exists from compute_glm_contrast_map()
+                # Remove .nii/.nii.gz extension properly before adding .png
+                png_name = brain_map_path.name.replace('.nii.gz', '').replace('.nii', '') + '.png'
+                precomputed_png = brain_map_path.parent.parent / 'figures' / png_name
+                img_data = None
+                actual_fig_filename = None
+                
+                if precomputed_png.exists():
+                    # Use the pre-computed PNG with correct coordinates
+                    import base64
+                    try:
+                        with open(precomputed_png, 'rb') as f:
+                            img_data = base64.b64encode(f.read()).decode('utf-8')
+                        actual_fig_filename = precomputed_png.name
+                        self._logger.debug(f"Using pre-computed PNG: {precomputed_png.name}")
+                    except Exception as png_error:
+                        self._logger.warning(f"Could not read pre-computed PNG: {png_error}")
+                
+                # If pre-computed PNG not available, generate lightbox visualization as fallback
+                if img_data is None:
+                    plot_seed_coords = cut_coords_from_metadata if cut_coords_from_metadata else seed_coords
+                    fig = plot_lightbox_axial_slices(
+                        str(brain_map_path),
+                        seed_coords=plot_seed_coords,
+                        seed_radius=seed_radius,
+                        title=f"Connectivity Map: {label}",
+                        n_slices=12,
+                        n_cols=3
+                    )
+                    
+                    if fig is not None:
+                        img_data = self._figure_to_base64(fig, dpi=150)
+                        actual_fig_filename = f'brainmap-{label.replace(" ", "-")}.png'
+                        plt.close(fig)
+                
+                if img_data is not None:
+                    fig_id = self._get_unique_figure_id()
+                    
+                    # Load NIfTI to get statistics
+                    import nibabel as nib
+                    img = nib.load(brain_map_path)
+                    img_data_array = img.get_fdata()
+                    nonzero = img_data_array[img_data_array != 0]
+                    
+                    # Compute statistics
+                    if len(nonzero) > 0:
+                        mean_val = np.mean(nonzero)
+                        std_val = np.std(nonzero)
+                        max_val = np.max(img_data_array)
+                        min_val = np.min(img_data_array)
+                        n_voxels = np.sum(img_data_array != 0)
                     else:
-                        n_rois = 100
-                    atlas = fetch_atlas_schaefer_2018(n_rois=n_rois, resolution_mm=2)
-                    atlas_img = atlas['maps']
-                elif atlas_name == "aal":
-                    from nilearn.datasets import fetch_atlas_aal
-                    atlas = fetch_atlas_aal()
-                    atlas_img = atlas['maps']
-                elif atlas_name == "harvardoxford":
-                    from nilearn.datasets import fetch_atlas_harvard_oxford
-                    atlas = fetch_atlas_harvard_oxford('cort-maxprob-thr25-2mm')
-                    atlas_img = atlas['maps']
-                else:
-                    logger.warning(f"Unknown atlas for connectome plot: {atlas_name}")
-                    return None
-                
-                # Get coordinates from atlas
-                coords = find_parcellation_cut_coords(atlas_img)
-                
+                        mean_val = std_val = max_val = min_val = 0
+                        n_voxels = 0
+                    
+                    # Format seed information if available
+                    seed_info_html = ""
+                    if seed_coords is not None:
+                        logger.debug(f"Formatting seed info for {label}: coords={seed_coords}")
+                        seed_coords_str = ", ".join([f"{c:.2f}" for c in seed_coords])
+                        seed_info_html = f'''<div class="metric-card">
+                            <div class="metric-value">{label}</div>
+                            <div class="metric-label">Seed Name</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">[{seed_coords_str}]</div>
+                            <div class="metric-label">Seed Coordinates (mm)</div>
+                        </div>'''
+                        logger.debug(f"Generated seed_info_html: {bool(seed_info_html)}")
+                    
+                    # Build HTML for this brain map
+                    html += f'''
+                    <h3>{label}</h3>
+                    
+                    <div class="metrics-grid">
+                        {seed_info_html}
+                        <div class="metric-card">
+                            <div class="metric-value">{n_voxels:,}</div>
+                            <div class="metric-label">Non-zero Voxels</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">{mean_val:.3f}</div>
+                            <div class="metric-label">Mean Connectivity</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">{std_val:.3f}</div>
+                            <div class="metric-label">Std Connectivity</div>
+                        </div>
+                        <div class="metric-card">
+                            <div class="metric-value">[{min_val:.2f}, {max_val:.2f}]</div>
+                            <div class="metric-label">Range</div>
+                        </div>
+                    </div>
+                    
+                    <div class="figure-container">
+                        <div class="figure-wrapper">
+                            <img id="{fig_id}" src="data:image/png;base64,{img_data}">
+                            <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_fig_filename}')">
+                                ⬇️ Download
+                            </button>
+                        </div>
+                        <div class="figure-caption">
+                            Figure: Orthogonal view showing connectivity strength for {label}.
+                            <br><strong>File:</strong> <code>{brain_map_path.name}</code>
+                        </div>
+                    </div>
+                    '''
+                    
             except Exception as e:
-                logger.warning(f"Could not load atlas for connectome plot: {e}")
-                return None
-            
-            # Ensure coords and matrix dimensions match
-            if len(coords) != matrix.shape[0]:
-                logger.warning(
-                    f"Coordinate count ({len(coords)}) does not match matrix size ({matrix.shape[0]})"
-                )
-                return None
-            
-            # Build labels
-            type_labels = {
-                'correlation': 'Pearson Correlation',
-                'covariance': 'Covariance',
-                'partial correlation': 'Partial Correlation',
-                'precision': 'Precision'
-            }
-            measure_label = type_labels.get(connectivity_type, 'Connectivity')
-            
-            # Create figure
-            fig, ax = plt.subplots(figsize=(10, 6))
-            
-            # For connectome plot, we threshold edges to show only the strongest
-            # Use 80th percentile to show top 20% of connections
-            plotting.plot_connectome(
-                matrix,
-                coords,
-                node_color='steelblue',
-                node_size=30,
-                edge_threshold="80%",  # Show top 20% of edges
-                edge_vmin=np.percentile(matrix, 5),
-                edge_vmax=np.percentile(matrix, 95),
-                display_mode='z',  # Axial view
-                colorbar=True,
-                axes=ax,
-                title=f'{measure_label} Connectome (axial view, top 20% edges)'
-            )
-            
-            # Note: skip tight_layout as nilearn's axes are not compatible
-            return fig
-            
-        except ImportError as e:
-            logger.warning(f"Could not import required libraries for connectome plot: {e}")
-            return None
-        except Exception as e:
-            logger.warning(f"Could not create connectome plot: {e}")
-            return None
-    
+                logger.warning(f"Failed to create brain map visualization for {label}: {e}")
+                html += f'''
+                <h3>{label}</h3>
+                <div class="info-box">
+                    <p>Failed to visualize brain map: {str(e)}</p>
+                    <p><strong>File:</strong> <code>{brain_map_path}</code></p>
+                </div>
+                '''
+        
+        html += "</div>"
+        return html
+
     def _build_qa_section(self) -> str:
         """Build quality assurance section."""
         if not self.qa_metrics:
@@ -2411,6 +2424,96 @@ class ParticipantReportGenerator:
         '''
         return html
     
+    def _format_command_for_display(self, command: str) -> str:
+        """Format CLI command with line breaks for readability.
+        
+        Breaks long command lines at argument boundaries to make them easier
+        to read and copy in the report.
+        
+        Parameters
+        ----------
+        command : str
+            Raw command line string.
+        
+        Returns
+        -------
+        str
+            Formatted command with line breaks and proper indentation.
+        """
+        # Split the command into logical groups
+        # Base command stays on first line
+        parts = command.split()
+        
+        if len(parts) <= 4:
+            # Short commands fit on one line
+            return command
+        
+        # Start with base command (connectomix /path /path/to/output participant)
+        formatted_lines = [" ".join(parts[:4])]
+        
+        # Group remaining arguments by category for readability
+        remaining_args = parts[4:]
+        
+        # Known argument groups for logical organization
+        arg_groups = {
+            'filter': ['--participant-label', '--task', '--session', '--run'],
+            'method': ['--method', '--atlas', '--roi-atlas', '--roi-mask', '--roi-label',
+                      '--seeds-file', '--radius'],
+            'connectivity': ['--connectivity-kind'],
+            'canica': ['--n-components', '--canica-threshold', '--canica-min-region-size'],
+            'temporal': ['--drop-initial', '--conditions', '--transition-buffer'],
+            'output': ['--label', '--derivatives'],
+        }
+        
+        # Track which arguments have been used
+        used_args = set()
+        
+        # Add arguments in logical groups
+        for group_name, group_keywords in arg_groups.items():
+            group_args = []
+            i = 0
+            while i < len(remaining_args):
+                arg = remaining_args[i]
+                
+                # Check if this arg matches any in the current group
+                if any(arg == keyword or arg.startswith(keyword) 
+                      for keyword in group_keywords):
+                    # Collect the argument and its value(s)
+                    arg_with_value = [arg]
+                    i += 1
+                    
+                    # Collect values for this argument
+                    while i < len(remaining_args) and not remaining_args[i].startswith('--'):
+                        arg_with_value.append(remaining_args[i])
+                        i += 1
+                    
+                    group_args.append(" ".join(arg_with_value))
+                    used_args.add(arg)
+                else:
+                    i += 1
+            
+            if group_args:
+                formatted_lines.append("    " + " ".join(group_args))
+        
+        # Add any remaining arguments that weren't categorized
+        remaining = []
+        i = 0
+        while i < len(remaining_args):
+            if remaining_args[i] not in used_args:
+                arg_with_value = [remaining_args[i]]
+                i += 1
+                while i < len(remaining_args) and not remaining_args[i].startswith('--'):
+                    arg_with_value.append(remaining_args[i])
+                    i += 1
+                remaining.append(" ".join(arg_with_value))
+            else:
+                i += 1
+        
+        if remaining:
+            formatted_lines.append("    " + " ".join(remaining))
+        
+        return " \\\n".join(formatted_lines)
+    
     def _build_command_section(self) -> str:
         """Build command line / configuration section."""
         self.toc_items.append(("reproducibility", "Reproducibility"))
@@ -2423,10 +2526,17 @@ class ParticipantReportGenerator:
         '''
         
         if self.command_line:
+            # Format the command for better readability in the report
+            formatted_cmd = self._format_command_for_display(self.command_line)
             html += f'''
             <h3>Command Line</h3>
+            <p style="font-size: 0.9em; color: #666;">
+                <em>Note: Paths are replaced with placeholders for portability.
+                Replace <code>/path/to/rawdata</code>, <code>/path/to/derivatives</code>,
+                and mask paths with actual paths on your system.</em>
+            </p>
             <div class="code-block">
-{self.command_line}
+{formatted_cmd}
             </div>
             '''
         
@@ -2568,6 +2678,7 @@ class ParticipantReportGenerator:
         sections_html += self._build_confounds_section()
         sections_html += self._build_censoring_section()
         sections_html += self._build_connectivity_section()
+        sections_html += self._build_brain_maps_section()
         sections_html += self._build_qa_section()
         sections_html += self._build_command_section()
         sections_html += self._build_references_section()
@@ -2621,36 +2732,44 @@ class ParticipantReportGenerator:
         # Get denoising strategy if set
         denoising_strategy = getattr(self.config, 'denoising_strategy', None)
         
-        if self.subject_id.startswith('sub-'):
-            filename = self.subject_id
-            if denoising_strategy:
-                filename += f"_denoise-{denoising_strategy}"
-            if self.censoring:
-                filename += f"_censoring-{self.censoring}"
-            if self.condition:
-                filename += f"_condition-{self.condition}"
-            if self.label:
-                filename += f"_label-{self.label}"
-            if self.desc:
-                filename += f"_desc-{self.desc}"
+        # Sanitize all components for safe filenames
+        safe_subject_id = sanitize_filename(self.subject_id)
+        safe_denoising_strategy = sanitize_filename(denoising_strategy) if denoising_strategy else None
+        safe_censoring = sanitize_filename(self.censoring) if self.censoring else None
+        safe_condition = sanitize_filename(self.condition) if self.condition else None
+        safe_label = sanitize_filename(self.label) if self.label else None
+        safe_desc = sanitize_filename(self.desc) if self.desc else None
+        
+        if safe_subject_id.startswith('sub-'):
+            filename = safe_subject_id
+            if safe_denoising_strategy:
+                filename += f"_denoise-{safe_denoising_strategy}"
+            if safe_censoring:
+                filename += f"_censoring-{safe_censoring}"
+            if safe_condition:
+                filename += f"_condition-{safe_condition}"
+            if safe_label:
+                filename += f"_label-{safe_label}"
+            if safe_desc:
+                filename += f"_desc-{safe_desc}"
             filename += "_report.html"
             report_path = output_path / filename
         else:
-            filename_parts = [f"sub-{self.subject_id}"]
+            filename_parts = [f"sub-{safe_subject_id}"]
             if self.session:
-                filename_parts.append(f"ses-{self.session}")
+                filename_parts.append(f"ses-{sanitize_filename(self.session)}")
             if self.task:
-                filename_parts.append(f"task-{self.task}")
-            if denoising_strategy:
-                filename_parts.append(f"denoise-{denoising_strategy}")
-            if self.censoring:
-                filename_parts.append(f"censoring-{self.censoring}")
-            if self.condition:
-                filename_parts.append(f"condition-{self.condition}")
-            if self.label:
-                filename_parts.append(f"label-{self.label}")
-            if self.desc:
-                filename_parts.append(f"desc-{self.desc}")
+                filename_parts.append(f"task-{sanitize_filename(self.task)}")
+            if safe_denoising_strategy:
+                filename_parts.append(f"denoise-{safe_denoising_strategy}")
+            if safe_censoring:
+                filename_parts.append(f"censoring-{safe_censoring}")
+            if safe_condition:
+                filename_parts.append(f"condition-{safe_condition}")
+            if safe_label:
+                filename_parts.append(f"label-{safe_label}")
+            if safe_desc:
+                filename_parts.append(f"desc-{safe_desc}")
             filename_parts.append("report.html")
             report_path = output_path / "_".join(filename_parts)
         
@@ -2726,6 +2845,7 @@ class GroupReportGenerator:
         session: Optional[str] = None,
         atlas_coords: Optional[np.ndarray] = None,
         roi_labels: Optional[List[str]] = None,
+        denoising_strategy: Optional[str] = None,
     ):
         """Initialize group report generator.
         
@@ -2742,6 +2862,7 @@ class GroupReportGenerator:
             session: Session name (optional).
             atlas_coords: ROI coordinates for connectome plots (optional).
             roi_labels: ROI labels for matrix annotations (optional).
+            denoising_strategy: Denoising strategy used (e.g., 'scrubbing5', 'simpleGSR').
         """
         self.results = results
         self.config = config
@@ -2762,14 +2883,54 @@ class GroupReportGenerator:
         self.figures_dir = self.output_dir / "figures"
         self.figures_dir.mkdir(parents=True, exist_ok=True)
         
-        self._logger = logger
+        self._logger = logger if 'logger' in locals() else logging.getLogger(__name__)
         self._figure_counter = 0
         self.toc_items = []
+        
+        # Denoising strategy - use parameter if provided, otherwise try config
+        self.denoising_strategy = denoising_strategy or getattr(config, 'denoising_strategy', None)
     
     def _get_unique_figure_id(self) -> str:
         """Generate unique figure ID."""
         self._figure_counter += 1
         return f"fig_group_{self._figure_counter}"
+    
+    def _build_bids_figure_filename(self, figure_type: str, desc: str) -> str:
+        """Build BIDS-compliant figure filename for group-level analysis.
+        
+        Pattern: [task-<task>][_ses-<session>][_denoise-<method>][_atlas-<atlas>]
+                 [_desc-<desc>][_<figure_type>].<ext>
+        
+        Args:
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description (e.g., 'correlation', 'deviations')
+            
+        Returns:
+            BIDS-compliant filename like: task-rest_atlas-schaefer2018n100_desc-deviations_connectivity.png
+        """
+        filename_parts = ["group"]
+        
+        if self.task:
+            filename_parts.append(f"task-{self.task}")
+        
+        if self.session:
+            filename_parts.append(f"ses-{self.session}")
+        
+        # Add denoising strategy
+        if self.denoising_strategy and self.denoising_strategy != "none":
+            filename_parts.append(f"denoise-{self.denoising_strategy}")
+        
+        # Add atlas
+        if hasattr(self.config, 'atlas') and self.config.atlas:
+            filename_parts.append(f"atlas-{self.config.atlas}")
+        
+        # Add description
+        if desc:
+            filename_parts.append(f"desc-{desc}")
+        
+        # Add figure type as suffix
+        base_filename = "_".join(filename_parts)
+        return f"{base_filename}_{figure_type}.png"
     
     def _figure_to_base64(self, fig: plt.Figure, dpi: int = 150) -> str:
         """Convert matplotlib figure to base64 string."""
@@ -2779,8 +2940,20 @@ class GroupReportGenerator:
         buf.seek(0)
         return base64.b64encode(buf.read()).decode('utf-8')
     
-    def _save_figure_to_disk(self, fig: plt.Figure, filename: str, dpi: int = 150) -> Path:
-        """Save figure to disk."""
+    def _save_figure_to_disk(self, fig: plt.Figure, figure_type: str, desc: str, dpi: int = 150) -> Path:
+        """Save figure to disk with BIDS-compliant filename.
+        
+        Args:
+            fig: Matplotlib figure to save
+            figure_type: Type of figure (e.g., 'connectivity', 'histogram')
+            desc: Description entity (e.g., 'mean', 'deviations')
+            dpi: Resolution for saving
+            
+        Returns:
+            Path to saved figure
+        """
+        # Build BIDS-compliant filename
+        filename = self._build_bids_figure_filename(figure_type, desc)
         filepath = self.figures_dir / filename
         fig.savefig(filepath, format='png', dpi=dpi, bbox_inches='tight',
                    facecolor='white', edgecolor='none')
@@ -2992,14 +3165,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "group_mean_connectivity.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'connectivity', 'mean', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'group_mean_connectivity.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">
                         ⬇️ Download
                     </button>
                 </div>
@@ -3031,14 +3205,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "tangent_deviations.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'deviation', 'tangent', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'tangent_deviations.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">​
                         ⬇️ Download
                     </button>
                 </div>
@@ -3054,14 +3229,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "deviation_histogram.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'histogram', 'deviation', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'deviation_histogram.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">
                         ⬇️ Download
                     </button>
                 </div>
@@ -3077,14 +3253,15 @@ class GroupReportGenerator:
         if fig is not None:
             fig_id = self._get_unique_figure_id()
             img_data = self._figure_to_base64(fig, dpi=150)
-            self._save_figure_to_disk(fig, "inter_subject_variance.png", dpi=150)
+            saved_path = self._save_figure_to_disk(fig, 'variance', 'inter-subject', dpi=150)
+            actual_filename = saved_path.name
             plt.close(fig)
             
             html += f'''
             <div class="figure-container">
                 <div class="figure-wrapper">
                     <img id="{fig_id}" src="data:image/png;base64,{img_data}">
-                    <button class="download-btn" onclick="downloadFigure('{fig_id}', 'inter_subject_variance.png')">
+                    <button class="download-btn" onclick="downloadFigure('{fig_id}', '{actual_filename}')">
                         ⬇️ Download
                     </button>
                 </div>

@@ -1,0 +1,92 @@
+# Connectomix Configuration: ROI-to-Voxel with Atlas Labels
+#
+# This configuration demonstrates ROI-to-voxel connectivity analysis
+# with ROIs extracted from a standard atlas by label names.
+#
+# Usage:
+#   connectomix /path/to/bids /path/to/output participant --config roi_to_voxel_atlas.yaml
+
+# BIDS Entity Filters
+# ==================
+# Filter which data to process from your BIDS dataset
+
+subject: ["01"]                    # Subject IDs (without "sub-" prefix)
+tasks: ["rest"]                    # Task names
+sessions: null                     # Session IDs (null = all sessions)
+runs: null                         # Run numbers (null = all runs)
+spaces: ["MNI152NLin2009cAsym"]   # MNI spaces to use
+
+# Analysis Method
+# ===============
+method: "roiToVoxel"
+
+# ROI-to-Voxel Configuration
+# ==========================
+# OPTION: Extract ROIs from atlas using labels
+# Specify an atlas and one or more region labels to extract
+
+roi_atlas: "schaefer_100"          # Atlas to use (see below for available atlases)
+
+roi_label:                         # REQUIRED: ROI label(s) to extract from atlas
+                                   # These labels are used in output filenames
+  - "7Networks_DMN_PCC"           # Posterior Cingulate Cortex / Default Mode Network
+  - "7Networks_DMN_mPFC"          # Medial Prefrontal Cortex / Default Mode Network
+  - "7Networks_DAN_FEF_L"         # Left Frontal Eye Field / Dorsal Attention Network
+  - "7Networks_DAN_FEF_R"         # Right Frontal Eye Field / Dorsal Attention Network
+
+# Denoised Data Location
+# ======================
+denoised_derivatives: null         # Path to denoised data (if not using --derivatives flag)
+
+# Output Options
+# ==============
+label: null                        # Custom label for output filenames (optional)
+
+# Connectivity Computation
+# ========================
+connectivity_kind: "correlation"   # Type of connectivity measure ("correlation", "covariance", etc.)
+
+# Temporal Censoring (Optional)
+# =============================
+# Uncomment to enable condition-based analysis or motion censoring
+condition_masking:
+  enabled: false
+  # events_file: "auto"           # Auto-detect from BIDS, or provide explicit path
+  # conditions: ["rest"]           # Condition names to include (empty = all)
+  # transition_buffer: 0.0         # Seconds to exclude around boundaries
+  # min_volumes_retained: 50       # Minimum volumes required
+  # min_fraction_retained: 0.3     # Minimum fraction of volumes
+
+# Advanced Options (Usually not needed)
+# ======================================
+# Advanced options are preserved for backward compatibility but not required
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AVAILABLE ATLASES FOR ROI EXTRACTION
+# ═══════════════════════════════════════════════════════════════════════════════
+# 
+# Schaefer (Functional Parcellations):
+#   - schaefer_100   - 100 parcels, 7 networks
+#   - schaefer_200   - 200 parcels, 7 networks
+#   - schaefer_400   - 400 parcels, 7 networks
+#   - schaefer_100_17 - 100 parcels, 17 networks
+#   - schaefer_200_17 - 200 parcels, 17 networks
+#   - schaefer_400_17 - 400 parcels, 17 networks
+# 
+# Anatomical Atlases:
+#   - aal            - Automated Anatomical Labeling (116 regions)
+#   - harvard_oxford_cort - Harvard-Oxford Cortical Atlas (48 regions)
+#   - harvard_oxford_sub  - Harvard-Oxford Subcortical Atlas (21 regions)
+#   - destrieux      - Destrieux Atlas / FreeSurfer-based (148 regions)
+# 
+# Dictionary-Based Atlases:
+#   - difumo_64      - Dictionary-based Functional Atlas (64 components)
+#   - difumo_128     - Dictionary-based Functional Atlas (128 components)
+#   - msdl           - Multi-Subject Dictionary Learning Atlas (39 regions)
+#
+# To find available labels for an atlas, load and inspect:
+#   from connectomix.data.atlases import load_atlas
+#   atlas_img, labels = load_atlas("schaefer_100")
+#   for i, label in enumerate(labels):
+#       print(f"{i}: {label}")
+# ═══════════════════════════════════════════════════════════════════════════════
