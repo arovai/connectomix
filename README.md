@@ -60,16 +60,11 @@ connectomix --version
 
 ## Quick Start
 
-### Migration from Connectomix 3.0.0 to 4.0.0
+### Preprocessing Requirement
 
-**Major Change:** Connectomix 4.0.0 removes the built-in denoising step. Denoising is now handled by a separate, dedicated tool.
+Connectomix requires **pre-denoised fMRI data**. Before running Connectomix, you must first denoise your data using [fmridenoiser](https://github.com/ln2t/fmridenoiser) or another denoising pipeline that produces BIDS `desc-denoised_bold` files.
 
-**What changed:**
-- ❌ Denoising functionality has been removed from Connectomix
-- ✅ Use [fmridenoiser](https://github.com/ln2t/fmridenoiser) for data denoising
-- ✅ Connectomix now focuses exclusively on connectivity analysis from pre-denoised data
-
-**Updated Workflow:**
+**Complete Workflow:**
 
 ```bash
 # Step 1: Denoise your raw fMRI data with fmridenoiser
