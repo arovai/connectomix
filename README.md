@@ -1,15 +1,12 @@
-<p align="center">
-  
-  # Connectomix
-  
-  <strong>Functional Connectivity Analysis from fmridenoiser Outputs</strong>
-</p>
+<div align="center">
 
-<p align="center">
-  <a href="#installation">Installation</a> •
-  <a href="#quick-start">Quick Start</a> •
-  <a href="#configuration">Configuration</a>
-</p>
+# Connectomix
+
+**Functional Connectivity Analysis from fmridenoiser Outputs**
+
+[Overview](#overview) | [Installation](#installation) | [Quick Start](#quick-start) | [Configuration](#configuration)
+
+</div>
 
 ---
 
