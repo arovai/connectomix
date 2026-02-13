@@ -8,9 +8,7 @@
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
   <a href="#analysis-methods">Methods</a> •
-  <a href="#temporal-censoring">Temporal Censoring</a> •
-  <a href="#configuration">Configuration</a> •
-  <a href="#documentation">Documentation</a>
+  <a href="#configuration">Configuration</a>
 </p>
 
 ---
@@ -58,16 +56,148 @@ connectomix --version
 - Python 3.8+
 - Pre-denoised fMRI data (from fmridenoiser or similar denoising pipeline)
 
-### Manual Atlas Dataset Download
+---
 
-When Connectomix uses standard atlases (Schaefer, AAL, Harvard-Oxford), nilearn automatically downloads them on first use. However, **in environments with SSL certificate issues or without internet access**, you can manually download and cache these datasets.
+## Quick Start
 
-#### Why Manual Download?
+### Migration from Connectomix 3.0.0 to 4.0.0
 
-- **SSL/Certificate issues**: Some networks block SSL connections or have certificate verification failures
-- **Offline environments**: Air-gapped systems without internet access
-- **Network restrictions**: Firewalls blocking downloads from GitHub, GIN, or FSL servers
-- **Reproducibility**: Pre-cache atlases for guaranteed availability
+**Major Change:** Connectomix 4.0.0 removes the built-in denoising step. Denoising is now handled by a separate, dedicated tool.
+
+**What changed:**
+- ❌ Denoising functionality has been removed from Connectomix
+- ✅ Use [fmridenoiser](https://github.com/ln2t/fmridenoiser) for data denoising
+- ✅ Connectomix now focuses exclusively on connectivity analysis from pre-denoised data
+
+**Updated Workflow:**
+
+```bash
+# Step 1: Denoise your raw fMRI data with fmridenoiser
+fmridenoiser /path/to/bids /path/to/fmridenoiser_output participant
+
+# Step 2: Run Connectomix on the denoised outputs
+connectomix /path/to/fmridenoiser_output /path/to/connectomix_output participant
+```
+
+### Basic Usage (Recommended)
+
+```bash
+# PRIMARY: Use denoised output directory directly
+connectomix /path/to/fmridenoiser_output /data/output participant
+
+# ALTERNATIVE: Specify raw BIDS with derivatives path
+connectomix /data/bids /data/output participant \
+    --derivatives fmridenoiser=/path/to/fmridenoiser
+```
+
+### Common Workflow Examples
+
+```bash
+# Process specific participant
+connectomix /path/to/fmridenoiser_output /data/output participant \
+    --participant-label 01
+
+# Process task and custom atlas
+connectomix /path/to/fmridenoiser_output /data/output participant \
+    --task rest --atlas aal
+
+# Using configuration file
+connectomix /path/to/fmridenoiser_output /data/output participant \
+    --config analysis_config.yaml
+```
+
+### Input Data Requirements
+
+#### Required: Denoised BOLD Files
+
+Connectomix requires **denoised fMRI data** to operate. It does NOT perform denoising itself. Denoised data must come from preprocessing pipelines like:
+
+- **Recommended:** [fmridenoiser](https://github.com/ln2t/fmridenoiser) - produces `desc-denoised_bold` files
+- **Also supported:** Pre-denoised outputs from similar pipelines
+
+**Connectomix expects files with the BIDS `desc-denoised_bold` label.**
+
+#### How to Use the Recommended Workflow
+
+```bash
+# Step 1: Run fmridenoiser on your raw BIDS dataset
+fmridenoiser /path/to/bids /path/to/fmridenoiser_output participant
+
+# Step 2: Run Connectomix with denoised outputs
+connectomix /path/to/bids /path/to/output participant \
+    --derivatives fmridenoiser=/path/to/fmridenoiser_output
+```
+
+#### Expected BIDS Directory Structure
+
+When using `--derivatives fmridenoiser=/path/to/fmridenoiser`, Connectomix expects:
+
+```
+fmridenoiser_output/
+├── sub-01/
+│   └── func/
+│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.nii.gz
+│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.json
+│       └── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_confounds.tsv
+├── sub-02/
+│   └── func/
+│       └── ...
+└── dataset_description.json
+```
+
+#### Condition-Based Temporal Censoring with Raw Data
+
+If you need to apply condition-based masking (selecting specific task conditions), you must provide access to the task events file:
+
+```bash
+# Use denoised output directory with events file
+connectomix /path/to/fmridenoiser_output /data/output participant \
+    --events-file /path/to/task-events.tsv \
+    --conditions "go,stop" \
+    --include-baseline
+```
+
+Alternatively, provide events from raw BIDS:
+
+```bash
+# If using raw BIDS with derivatives path
+connectomix /data/bids /data/output participant \
+    --derivatives fmridenoiser=/path/to/fmridenoiser \
+    --conditions "go,stop"
+```
+
+
+### Common Command-Line Arguments
+
+| Argument | Short | Description | Example |
+|----------|-------|-------------|---------|
+| `--derivatives` | | Denoised derivatives location | `--derivatives fmridenoiser=/path/to/fmridenoiser` |
+| `--participant-label` | `-p` | Subject(s) to process | `-p 01` |
+| `--task` | `-t` | Task name to process | `-t restingstate` |
+| `--session` | `-s` | Session to process | `-s 1` |
+| `--run` | `-r` | Run to process | `-r 1` |
+| `--space` | | MNI space to use | `--space MNI152NLin2009cAsym` |
+| `--config` | `-c` | Config file path | `-c my_config.yaml` |
+| `--atlas` | | Atlas for ROI connectivity | `--atlas schaefer2018n200` |
+| `--method` | | Connectivity method | `--method roiToRoi` |
+| `--denoising` | | Predefined strategy | `--denoising csfwm_6p` |
+| `--derivatives` | `-d` | Derivative locations | `-d fmriprep=/path` |
+| `--label` | | Custom output label | `--label myanalysis` |
+| `--verbose` | `-v` | Enable debug output | `-v` |
+
+---
+
+## ⚠️ Important Note
+
+**Group-level analysis is currently under development and should NOT be used yet.**
+
+Connectomix currently supports participant-level (first-level) connectivity analysis only. Group-level statistical inference is planned for a future release. Please use the participant-level analysis workflow for your analyses.
+
+---
+
+## Manual Atlas Dataset Download (Optional)
+
+By default, Connectomix automatically downloads standard atlases (Schaefer, AAL, Harvard-Oxford) on first use via nilearn. However, in offline environments or for pre-caching purposes, you can manually download and cache these datasets locally.
 
 #### Where Connectomix Looks for Atlases
 
@@ -173,13 +303,13 @@ Test that Connectomix can access the cached atlases:
 
 ```bash
 # This will use the cached schaefer2018n100 atlas
-connectomix /data/bids /data/output participant --atlas schaefer2018n100
+connectomix /path/to/fmridenoiser_output /data/output participant --atlas schaefer2018n100
 
 # This will use the cached AAL atlas
-connectomix /data/bids /data/output participant --atlas aal
+connectomix /path/to/fmridenoiser_output /data/output participant --atlas aal
 
 # This will use the cached Harvard-Oxford atlas
-connectomix /data/bids /data/output participant --atlas harvardoxford
+connectomix /path/to/fmridenoiser_output /data/output participant --atlas harvardoxford
 ```
 
 If Connectomix finds the cached datasets, it will proceed without attempting to download.
@@ -210,32 +340,8 @@ ls ~/nilearn_data/fsl/data/atlases/HarvardOxford/HarvardOxford-cort-maxprob-thr2
 ```bash
 # Set environment variable before running Connectomix
 export NILEARN_DATA=/custom/atlas/path
-connectomix /data/bids /data/output participant --atlas schaefer2018n100
+connectomix /path/to/fmridenoiser_output /data/output participant --atlas schaefer2018n100
 ```
-
-#### Handling SSL Certificate Errors
-
-If you encounter SSL certificate errors when nilearn attempts to download atlases:
-
-**Option 1: Bypass SSL verification (temporary workaround)**
-
-```bash
-# Disable SSL verification for downloads (not recommended for security reasons)
-export PYTHONHTTPSVERIFY=0
-connectomix /data/bids /data/output participant --atlas schaefer2018n100
-```
-
-**Option 2: Point to custom CA certificates**
-
-```bash
-# If your institution provides custom CA certificates
-export REQUESTS_CA_BUNDLE=/path/to/ca-bundle.crt
-connectomix /data/bids /data/output participant --atlas schaefer2018n100
-```
-
-**Option 3: Use manual downloads (recommended)**
-
-This is the most robust solution - manually download atlases using `wget` or `curl` (which may handle SSL differently than Python), then cache them locally.
 
 #### Docker/Container Usage
 
@@ -261,129 +367,8 @@ Then run the container with the pre-cached data:
 
 ```bash
 docker run -v ~/nilearn_data:/root/nilearn_data -v /data:/data myimage \
-  connectomix /data/bids /data/output participant --atlas schaefer2018n100
+  connectomix /path/to/fmridenoiser_output /data/output participant --atlas schaefer2018n100
 ```
-
----
-
-## Quick Start
-
-### Basic Usage (Recommended)
-
-```bash
-# PRIMARY: Specify denoised data location using --derivatives
-# (uses fmridenoiser outputs for denoised BOLD files)
-connectomix /data/bids /data/output participant \
-    --derivatives fmridenoiser=/path/to/fmridenoiser
-
-# ALTERNATIVE: Use denoised output directory directly
-connectomix /data/denoised_output /data/output participant
-```
-
-### Common Workflow Examples
-
-```bash
-# Process specific participant
-connectomix /data/bids /data/output participant \
-    --derivatives fmridenoiser=/path/to/fmridenoiser \
-    --participant-label 01
-
-# Process task and custom atlas
-connectomix /data/bids /data/output participant \
-    --derivatives fmridenoiser=/path/to/fmridenoiser \
-    --task rest --atlas aal
-
-# Using configuration file
-connectomix /data/bids /data/output participant \
-    --config analysis_config.yaml
-```
-
-### Input Data Requirements
-
-#### Required: Denoised BOLD Files
-
-Connectomix requires **denoised fMRI data** to operate. It does NOT perform denoising itself. Denoised data must come from preprocessing pipelines like:
-
-- **Recommended:** [fmridenoiser](https://github.com/arovai/fmridenoiser) - produces `desc-denoised_bold` files
-- **Also supported:** Pre-denoised outputs from similar pipelines
-
-**Connectomix expects files with the BIDS `desc-denoised_bold` label.**
-
-#### How to Use the Recommended Workflow
-
-```bash
-# Step 1: Run fmridenoiser on your raw BIDS dataset
-fmridenoiser /path/to/bids /path/to/fmridenoiser_output participant
-
-# Step 2: Run Connectomix with denoised outputs
-connectomix /path/to/bids /path/to/output participant \
-    --derivatives fmridenoiser=/path/to/fmridenoiser_output
-```
-
-#### Expected BIDS Directory Structure
-
-When using `--derivatives fmridenoiser=/path/to/fmridenoiser`, Connectomix expects:
-
-```
-fmridenoiser_output/
-├── sub-01/
-│   └── func/
-│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.nii.gz
-│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.json
-│       └── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_confounds.tsv
-├── sub-02/
-│   └── func/
-│       └── ...
-└── dataset_description.json
-```
-
-#### Condition-Based Temporal Censoring with Raw Data
-
-If you need to apply condition-based masking (selecting specific task conditions), you must provide access to the task events file:
-
-```bash
-# Raw BIDS data is required for condition-based masking
-connectomix /data/bids /data/output participant \
-    --derivatives fmridenoiser=/path/to/fmridenoiser \
-    --conditions "go,stop" \
-    --include-baseline
-```
-
-Alternatively, provide the events file directly:
-
-```bash
-# If raw BIDS is not available, provide events file explicitly
-connectomix /data/denoised_output /data/output participant \
-    --events-file /path/to/task-events.tsv \
-    --conditions "go,stop"
-```
-
-
-### Common Command-Line Arguments
-
-| Argument | Short | Description | Example |
-|----------|-------|-------------|---------|
-| `--derivatives` | | Denoised derivatives location | `--derivatives fmridenoiser=/path/to/fmridenoiser` |
-| `--participant-label` | `-p` | Subject(s) to process | `-p 01` |
-| `--task` | `-t` | Task name to process | `-t restingstate` |
-| `--session` | `-s` | Session to process | `-s 1` |
-| `--run` | `-r` | Run to process | `-r 1` |
-| `--space` | | MNI space to use | `--space MNI152NLin2009cAsym` |
-| `--config` | `-c` | Config file path | `-c my_config.yaml` |
-| `--atlas` | | Atlas for ROI connectivity | `--atlas schaefer2018n200` |
-| `--method` | | Connectivity method | `--method roiToRoi` |
-| `--denoising` | | Predefined strategy | `--denoising csfwm_6p` |
-| `--derivatives` | `-d` | Derivative locations | `-d fmriprep=/path` |
-| `--label` | | Custom output label | `--label myanalysis` |
-| `--verbose` | `-v` | Enable debug output | `-v` |
-
----
-
-## ⚠️ Important Note
-
-**Group-level analysis is currently under development and should NOT be used yet.**
-
-Connectomix currently supports participant-level (first-level) connectivity analysis only. Group-level statistical inference is planned for a future release. Please use the participant-level analysis workflow for your analyses.
 
 ---
 
@@ -585,7 +570,6 @@ The precision matrix is the inverse of the covariance matrix. It encodes conditi
 | `schaefer2018n200` | 200 | Schaefer 7-network 200 parcels |
 | `aal` | 116 | Automated Anatomical Labeling |
 | `harvardoxford` | 96 | Harvard-Oxford cortical + subcortical |
-| `canica` | Custom | Data-driven ICA (computed from your data) |
 
 ### Using a Custom Atlas
 
@@ -600,7 +584,7 @@ Connectomix allows you to use a custom parcellation atlas for ROI-to-ROI or ROI-
 Pass the full path to a NIfTI parcellation file:
 
 ```bash
-connectomix /data/bids /data/output participant \
+connectomix /path/to/fmridenoiser_output /data/output participant \
   --atlas /path/to/my_atlas.nii.gz
 ```
 
@@ -620,7 +604,7 @@ cp /path/to/labels.csv ~/nilearn_data/my_custom_atlas/
 Then reference it by folder name:
 
 ```bash
-connectomix /data/bids /data/output participant --atlas my_custom_atlas
+connectomix /path/to/fmridenoiser_output /data/output participant --atlas my_custom_atlas
 ```
 
 #### Supported Label File Formats
@@ -658,19 +642,10 @@ LeftAmygdala
 RightAmygdala
 ```
 
-**JSON array:**
+**As a space-separated file:**
 
-```json
-["LeftHippocampus", "RightHippocampus", "LeftAmygdala", "RightAmygdala"]
-```
-
-**JSON with coordinates:**
-
-```json
-{
-  "labels": ["L Auditory", "R Auditory", "Frontal DMN"],
-  "coordinates": [[-53.28, -8.88, 32.36], [53.47, -6.49, 27.52], [-0.15, 51.42, 7.58]]
-}
+```txt
+LeftHippocampus RightHippocampus LeftAmygdala RightAmygdala
 ```
 
 #### File Naming Convention
@@ -691,141 +666,14 @@ If no labels file is found, Connectomix will:
 
 ---
 
-## Temporal Censoring
-
-Temporal censoring removes specific timepoints (volumes) from fMRI data before connectivity analysis. This is essential for:
-
-1. **Condition-based analysis** (task fMRI): Compute separate connectivity matrices for each experimental condition
-2. **Motion scrubbing**: Remove high-motion timepoints based on framewise displacement (FD)
-3. **Dummy scan removal**: Discard initial volumes during scanner equilibration
-
-**By default, temporal censoring is disabled.** Enable it with CLI options or configuration.
-
-
-### Condition-Based Analysis (Task fMRI)
-
-Compute connectivity for specific experimental conditions:
-
-```bash
-# Compute connectivity per condition
-connectomix /data/bids /data/output participant -t faces \
-  --conditions face house scrambled
-
-# Compute connectivity for BASELINE only (inter-trial intervals)
-# Use when you want to exclude task periods and keep only rest/ITI
-connectomix /data/bids /data/output participant -t gas \
-  --conditions baseline
-
-# Compute connectivity for both task conditions AND baseline
-connectomix /data/bids /data/output participant -t faces \
-  --conditions face house baseline
-
-# Legacy: --include-baseline flag (equivalent to adding 'baseline' to --conditions)
-connectomix /data/bids /data/output participant -t faces \
-  --conditions face house --include-baseline
-
-# Add buffer around condition transitions
-connectomix /data/bids /data/output participant -t faces \
-  --conditions face house --transition-buffer 2.0
-```
-
-**Special condition keywords:**
-- `baseline`, `rest`, `iti`, `inter-trial`: Select timepoints NOT covered by any event in events.tsv
-
-**How it works:**
-1. Reads the `events.tsv` file for your task (automatically found in BIDS structure)
-2. Identifies timepoints belonging to each condition based on onset/duration
-3. Creates separate masks for each condition
-4. Computes connectivity separately for each condition
-5. Outputs one connectivity matrix per condition with `condition-{name}` in the filename
-
-**Example output:**
-```
-sub-01/
-├── connectivity_data/
-│   ├── sub-01_task-faces_condition-face_desc-schaefer_correlation.npy
-│   ├── sub-01_task-faces_condition-house_desc-schaefer_correlation.npy
-│   └── sub-01_task-faces_condition-baseline_desc-schaefer_correlation.npy
-└── sub-01_task-faces_condition-face+house+baseline_desc-schaefer_report.html
-```
-
-**events.tsv format:**
-```tsv
-onset	duration	trial_type
-0.0	2.5	face
-3.0	2.5	house
-6.0	2.5	scrambled
-```
-
-### Motion Scrubbing
-
-Remove high-motion volumes based on framewise displacement:
-
-```bash
-# Remove volumes with FD > 0.5mm
-connectomix /data/bids /data/output participant --fd-threshold 0.5
-
-# Also censor ±1 volume around high-FD timepoints
-# Note: fMRIPrep's `framewise_displacement` values are in centimeters (cm).
-# The CLI expects the threshold in cm. Example: 0.5 -> 0.5 cm = 5.0 mm
-connectomix /data/bids /data/output participant --fd-threshold 0.5 --fd-extend 1
-```
-
-FD values are read from fMRIPrep's confounds file (`framewise_displacement` column).
-
-### Dummy Scan Removal
-
-Drop initial volumes during scanner equilibration:
-
-```bash
-connectomix /data/bids /data/output participant --drop-initial 4
-```
-
-### Combining Censoring Options
-
-```bash
-connectomix /data/bids /data/output participant -t faces \
-  --conditions face house \
-  --fd-threshold 0.3 \
-  --fd-extend 1 \
-  --drop-initial 4
-```
-
-### Temporal Censoring CLI Options
-
-| Argument | Description | Default |
-|----------|-------------|---------|
-| `--conditions COND [...]` | Condition names from events.tsv (use 'baseline' for inter-trial intervals) | (disabled) |
-| `--events-file FILE` | Path to events.tsv | auto-detect |
-| `--include-baseline` | Include inter-trial intervals (same as adding 'baseline' to --conditions) | false |
-| `--transition-buffer SEC` | Exclude N seconds around transitions | 0 |
-| `--fd-threshold CM` | Remove volumes with FD > threshold (value in cm; fMRIPrep reports FD in cm) | (disabled) |
-| `--fd-extend N` | Also remove ±N volumes around high-FD | 0 |
-| `--scrub N` | Keep only continuous segments of ≥N volumes after motion censoring | 0 (disabled) |
-| `--drop-initial N` | Drop first N volumes | 0 |
-
-**Note on `--scrub`:** After motion censoring, short isolated segments of kept volumes may be unreliable for connectivity estimation. The `--scrub` option removes any contiguous segment shorter than N volumes. For example, `--scrub 5` ensures all remaining data segments have at least 5 consecutive volumes.
-
-### Quality Control
-
-The HTML report includes a **Temporal Censoring** section showing:
-- Original vs retained volume counts
-- Censoring breakdown by reason (motion, initial drop, etc.)
-- Condition-specific volume counts
-- Visual censoring mask
-
-**Important:** If too few volumes remain after censoring (<30% or <50 volumes), Connectomix will issue a prominent warning in the report and logs. Results with very few volumes should be interpreted with caution as connectivity estimates become unreliable.
-
----
-
 ## Configuration
 
 ### Configuration File
 
-For complex analyses, use a YAML or JSON configuration file:
+For complex analyses, use a YAML configuration file:
 
 ```bash
-connectomix /data/bids /data/output participant -c config.yaml
+connectomix /path/to/fmridenoiser_output /data/output participant -c config.yaml
 ```
 
 ### Participant-Level Configuration
@@ -857,76 +705,6 @@ temporal_censoring:
     enabled: true
     conditions: ["face", "house"]
 ```
-
-### Denoising Strategies
-
-Use predefined strategies with `--denoising` or define custom confounds.
-
-The `simpleGSR` and `scrubbing5` strategies are based on Wang et al. (2024) *"Continuous evaluation of denoising strategies in resting-state fMRI connectivity using fMRIPrep and Nilearn"* ([PLoS Computational Biology](https://doi.org/10.1371/journal.pcbi.1011942)). **Which to choose?** Use `simpleGSR` when you need a continuous time series (required for autoregressive models, spectral analysis). Use `scrubbing5` when denoising quality is prioritized over temporal continuity, especially for high-motion datasets.
-
-| Strategy | Confounds | Description |
-|----------|-----------|-------------|
-| `minimal` | 6 motion parameters | Basic motion correction only |
-| `csfwm_6p` | CSF + WM + 6 motion | Standard denoising |
-| `csfwm_12p` | CSF + WM + 12 motion | With motion derivatives |
-| `gs_csfwm_6p` | Global + CSF + WM + 6 motion | Aggressive |
-| `gs_csfwm_12p` | Global + CSF + WM + 12 motion | Very aggressive |
-| `csfwm_24p` | CSF + WM + 24 motion | With derivatives and squares |
-| `compcor_6p` | 6 aCompCor + 6 motion | CompCor-based |
-| `simpleGSR` | Global + CSF + WM + 24 motion | Recommended for continuous time series |
-| `scrubbing5` | CSF/WM derivatives + 24 motion + censoring | **Includes FD=0.5cm + scrub=5** |
-
-#### The `scrubbing5` Strategy
-
-The `scrubbing5` strategy is special: it includes not only confound regression but also **volume censoring** parameters:
-
-- **Confounds:** CSF (with derivatives), WM (with derivatives), 24 motion parameters
-- **FD threshold:** 0.5 cm (automatically enabled)
-- **Segment filtering:** Minimum 5 contiguous volumes (automatically enabled)
-
-This strategy is **rigid** — you cannot combine it with manual `--fd-threshold` or `--scrub` options. If you need different censoring parameters, use a different strategy (like `csfwm_24p`) and set the censoring options manually:
-
-```bash
-# Use scrubbing5 with its built-in censoring (FD=0.5cm, scrub=5)
-connectomix /data/bids /data/output participant --denoising scrubbing5
-
-# ERROR: Cannot combine scrubbing5 with manual censoring options
-# connectomix ... --denoising scrubbing5 --fd-threshold 0.3  # Will fail!
-
-# Instead, use a different strategy with manual options
-connectomix /data/bids /data/output participant \
-  --denoising csfwm_24p \
-  --fd-threshold 0.3 \
-  --scrub 3
-```
-
-#### Wildcard Support
-
-Confound names support **shell-style wildcards** for flexible selection:
-
-| Pattern | Matches | Example |
-|---------|---------|---------|
-| `*` | Any characters | `trans_*` → `trans_x`, `trans_y`, `trans_z` |
-| `?` | Single character | `rot_?` → `rot_x`, `rot_y`, `rot_z` |
-| `[seq]` | Character in sequence | `a_comp_cor_0[0-5]` → first 6 aCompCor |
-
-**Examples:**
-
-```yaml
-# Select all 6 aCompCor components
-confounds: ["a_comp_cor_*"]
-
-# Select specific CompCor range
-confounds: ["c_comp_cor_0?", "csf", "white_matter"]
-
-# Motion + all cosine regressors
-confounds: ["trans_*", "rot_*", "cosine*"]
-
-# First 10 aCompCor components
-confounds: ["a_comp_cor_0*"]
-```
-
-> **Note:** If a wildcard pattern matches no columns, an error is raised with suggestions.
 
 ---
 
@@ -990,7 +768,7 @@ Each connectivity matrix (`.npy`) has an accompanying JSON sidecar with metadata
 | `schaefer2018n200` | 200 | 200 × 200 |
 | `aal` | 116 | 116 × 116 |
 | `harvardoxford` | 96 | 96 × 96 |
-| `canica` | Custom | N × N (user-defined) |
+
 
 ### Loading Connectivity Data
 
@@ -1068,8 +846,7 @@ Each participant-level HTML report includes:
 
 ```bash
 # 1. Run participant-level connectivity analysis
-connectomix /data/bids /data/output participant \
-  --derivatives fmridenoiser=/path/to/fmridenoiser \
+connectomix /path/to/fmridenoiser_output /data/output participant \
   -c participant_config.yaml -v
 
 # 2. Check HTML reports for quality assurance
@@ -1080,21 +857,13 @@ ls /data/output/sub-*/*.html
 
 ```bash
 # Compute connectivity for each condition
-connectomix /data/bids /data/output participant \
+connectomix /path/to/fmridenoiser_output /data/output participant \
   -t faces \
   --conditions face house scrambled \
   --fd-threshold 0.5 \
   -v
 ```
 
-### Workflow 3: Data-Driven Parcellation
-
-```yaml
-# Use CanICA to generate subject-specific parcellation
-method: "roiToRoi"
-atlas: "canica"
-n_components: 20
-```
 
 ---
 
@@ -1119,8 +888,6 @@ Connectomix will automatically resample if subjects have different geometries.
 1. **Start small**: Test with 1-2 subjects before full dataset
 2. **Use verbose mode** (`-v`) when debugging
 3. **Check HTML reports** for quality assurance
-4. **Denoising**: Start with `csfwm_6p`, adjust based on data quality
-5. **Temporal censoring**: Use appropriate FD thresholds (0.3-0.5 cm) for your data quality
 
 ---
 
@@ -1144,28 +911,6 @@ Connectomix will automatically resample if subjects have different geometries.
 | `atlas` | string | "schaefer2018n100" | Atlas name |
 | `connectivity_kind` | string | "correlation" | Connectivity measure |
 
-### Temporal Censoring Parameters
-
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `enabled` | bool | false | Enable censoring |
-| `drop_initial_volumes` | int | 0 | Dummy scans to drop |
-| `condition_selection.enabled` | bool | false | Enable condition selection |
-| `condition_selection.conditions` | list | [] | Conditions to include |
-| `condition_selection.transition_buffer` | float | 0 | Buffer (seconds) |
-| `min_volumes_retained` | int | 50 | Minimum volumes |
-| `min_fraction_retained` | float | 0.3 | Minimum fraction |
-
----
-
-## Documentation
-
-| File | Purpose |
-|------|---------|
-| **STATUS.md** | Current implementation status |
-| **ROADMAP.md** | Development priorities and plans |
-| **CLAUDE.md** | Coding guidelines (for developers) |
-
 ---
 
 ## Getting Help
@@ -1186,14 +931,10 @@ connectomix --help
 
 ## License
 
-[License information here]
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for details.
 
 ---
 
 ## Citation
 
-If you use Connectomix in your research, please cite:
-
-```
-[Citation information here]
-```
+If you use Connectomix in your research, please refer to the [GitHub repository](https://github.com/ln2t/connectomix).
