@@ -54,7 +54,8 @@ connectomix --version
 
 **Requirements:**
 - Python 3.8+
-- Pre-denoised fMRI data (from fmridenoiser or similar denoising pipeline)
+- fMRIPrep outputs (produced by [fMRIPrep](https://fmriprep.org/))
+- Denoised data from [fmridenoiser](https://github.com/ln2t/fmridenoiser) or similar pipeline
 
 ---
 
@@ -64,13 +65,18 @@ connectomix --version
 
 Connectomix requires **pre-denoised fMRI data**. Before running Connectomix, you must first denoise your data using [fmridenoiser](https://github.com/ln2t/fmridenoiser) or another denoising pipeline that produces BIDS `desc-denoised_bold` files.
 
+Note that **fmridenoiser expects fMRIPrep output as input** (not raw BIDS data).
+
 **Complete Workflow:**
 
 ```bash
-# Step 1: Denoise your raw fMRI data with fmridenoiser
-fmridenoiser /path/to/bids /path/to/fmridenoiser_output participant
+# Step 1: Run fMRIPrep on your raw BIDS data (if not already done)
+fmriprep /path/to/bids /path/to/fmriprep_output participant
 
-# Step 2: Run Connectomix on the denoised outputs
+# Step 2: Denoise fMRIPrep outputs with fmridenoiser
+fmridenoiser /path/to/fmriprep_output /path/to/fmridenoiser_output participant
+
+# Step 3: Run Connectomix on the denoised outputs
 connectomix /path/to/fmridenoiser_output /path/to/connectomix_output participant
 ```
 
@@ -115,12 +121,12 @@ Connectomix requires **denoised fMRI data** to operate. It does NOT perform deno
 #### How to Use the Recommended Workflow
 
 ```bash
-# Step 1: Run fmridenoiser on your raw BIDS dataset
-fmridenoiser /path/to/bids /path/to/fmridenoiser_output participant
+# Assumes you have fMRIPrep outputs already
+# Step 1: Run fmridenoiser on fMRIPrep outputs
+fmridenoiser /path/to/fmriprep_output /path/to/fmridenoiser_output participant
 
 # Step 2: Run Connectomix with denoised outputs
-connectomix /path/to/bids /path/to/output participant \
-    --derivatives fmridenoiser=/path/to/fmridenoiser_output
+connectomix /path/to/fmridenoiser_output /path/to/connectomix_output participant
 ```
 
 #### Expected BIDS Directory Structure
