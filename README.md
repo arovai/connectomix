@@ -65,7 +65,7 @@ connectomix --version
 
 Connectomix requires **pre-denoised fMRI data**. Before running Connectomix, you must first denoise your data using [fmridenoiser](https://github.com/ln2t/fmridenoiser) or another denoising pipeline that produces BIDS `desc-denoised_bold` files.
 
-Note that **fmridenoiser expects fMRIPrep output as input** (not raw BIDS data).
+Note that fmridenoiser expects fMRIPrep output as input (not raw BIDS data) - see [fmridenoiser](https://github.com/ln2t/fmridenoiser) for more information.
 
 **Complete Workflow:**
 
@@ -80,21 +80,10 @@ fmridenoiser /path/to/fmriprep_output /path/to/fmridenoiser_output participant
 connectomix /path/to/fmridenoiser_output /path/to/connectomix_output participant
 ```
 
-### Basic Usage (Recommended)
-
-```bash
-# PRIMARY: Use denoised output directory directly
-connectomix /path/to/fmridenoiser_output /data/output participant
-
-# ALTERNATIVE: Specify raw BIDS with derivatives path
-connectomix /data/bids /data/output participant \
-    --derivatives fmridenoiser=/path/to/fmridenoiser
-```
-
 ### Common Workflow Examples
 
 ```bash
-# Process specific participant
+# Process specific participant with default settings
 connectomix /path/to/fmridenoiser_output /data/output participant \
     --participant-label 01
 
@@ -102,49 +91,28 @@ connectomix /path/to/fmridenoiser_output /data/output participant \
 connectomix /path/to/fmridenoiser_output /data/output participant \
     --task rest --atlas aal
 
-# Using configuration file
+# Using configuration  for fully customized processing
 connectomix /path/to/fmridenoiser_output /data/output participant \
     --config analysis_config.yaml
 ```
 
-### Input Data Requirements
+### Four Processing Methods
 
-#### Required: Denoised BOLD Files
+Connectomix supports four distinct connectivity analysis methods, each suited for different research questions:
 
-Connectomix requires **denoised fMRI data** to operate. It does NOT perform denoising itself. Denoised data must come from preprocessing pipelines like:
+| Method | Input | Output | Best For |
+|--------|-------|--------|----------|
+| **Seed-to-Voxel** | Seed region(s) + whole brain | NIfTI maps (one per seed) | Identifying voxels connected to specific regions of interest |
+| **ROI-to-Voxel** | ROI region(s) + whole brain | NIfTI maps (one per ROI) | Mapping connectivity from anatomically or functionally defined areas |
+| **Seed-to-Seed** | Multiple seed regions | Correlation matrix | Analyzing connectivity within a predefined network |
+| **ROI-to-ROI** | Standard or custom atlas | Connectivity matrices (4 measures) | Whole-brain parcellation-based connectivity (most common) |
 
-- **Recommended:** [fmridenoiser](https://github.com/ln2t/fmridenoiser) - produces `desc-denoised_bold` files
-- **Also supported:** Pre-denoised outputs from similar pipelines
+**Quick Reference:**
+- Use **Seed-to-Voxel** or **ROI-to-Voxel** for hypothesis-driven analyses with a priori regions
+- Use **Seed-to-Seed** or **ROI-to-ROI** for network-level connectivity (correlation, covariance, partial correlation, precision)
+- **ROI-to-ROI** is the most common approach, using standard atlases like Schaefer or AAL
 
-**Connectomix expects files with the BIDS `desc-denoised_bold` label.**
-
-#### How to Use the Recommended Workflow
-
-```bash
-# Assumes you have fMRIPrep outputs already
-# Step 1: Run fmridenoiser on fMRIPrep outputs
-fmridenoiser /path/to/fmriprep_output /path/to/fmridenoiser_output participant
-
-# Step 2: Run Connectomix with denoised outputs
-connectomix /path/to/fmridenoiser_output /path/to/connectomix_output participant
-```
-
-#### Expected BIDS Directory Structure
-
-When using `--derivatives fmridenoiser=/path/to/fmridenoiser`, Connectomix expects:
-
-```
-fmridenoiser_output/
-├── sub-01/
-│   └── func/
-│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.nii.gz
-│       ├── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_bold.json
-│       └── sub-01_task-rest_space-MNI152NLin2009cAsym_desc-denoised_confounds.tsv
-├── sub-02/
-│   └── func/
-│       └── ...
-└── dataset_description.json
-```
+See [Analysis Methods](#analysis-methods) section for detailed examples and configuration options for each method.
 
 #### Condition-Based Temporal Censoring with Raw Data
 
@@ -154,8 +122,7 @@ If you need to apply condition-based masking (selecting specific task conditions
 # Use denoised output directory with events file
 connectomix /path/to/fmridenoiser_output /data/output participant \
     --events-file /path/to/task-events.tsv \
-    --conditions "go,stop" \
-    --include-baseline
+    --conditions "go,baseline"
 ```
 
 Alternatively, provide events from raw BIDS:
