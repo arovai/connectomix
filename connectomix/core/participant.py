@@ -1467,6 +1467,11 @@ def _compute_connectivity(
             radius=config.radius,
         )
         output_paths.append(output_path)
+        
+        # Load the computed matrix for the report
+        connectivity_matrix = np.load(output_path)
+        roi_names = seeds_names
+        connectivity_matrices = {'correlation': connectivity_matrix}
     
     elif method == "roiToRoi":
         file_entities['atlas'] = config.atlas
