@@ -7,7 +7,6 @@
 <p align="center">
   <a href="#installation">Installation</a> •
   <a href="#quick-start">Quick Start</a> •
-  <a href="#analysis-methods">Methods</a> •
   <a href="#configuration">Configuration</a>
 </p>
 
@@ -15,7 +14,7 @@
 
 ## Overview
 
-**Connectomix** is a BIDS-compliant tool for computing functional connectivity from pre-denoised fMRI data. It works with denoised outputs from **fmridenoiser** (recommended) or other denoising pipelines that produce BIDS `desc-denoised_bold` files. Connectomix supports multiple connectivity methods at the participant level, with comprehensive HTML reports for quality assurance.
+**Connectomix** is a BIDS-compliant tool for computing functional connectivity from pre-denoised fMRI data. Built on **Nilearn**, it works with denoised outputs from **fmridenoiser** (recommended) or other denoising pipelines that produce BIDS `desc-denoised_bold` files. Connectomix supports multiple connectivity methods at the participant level, with comprehensive HTML reports for quality assurance.
 
 **Note:** Group-level analysis is under development and should not be used yet.
 
@@ -112,7 +111,7 @@ Connectomix supports four distinct connectivity analysis methods, each suited fo
 - Use **Seed-to-Seed** or **ROI-to-ROI** for network-level connectivity (correlation, covariance, partial correlation, precision)
 - **ROI-to-ROI** is the most common approach, using standard atlases like Schaefer or AAL
 
-See [Analysis Methods](#analysis-methods) section for detailed examples and configuration options for each method.
+See the [Configuration](#configuration) section for detailed examples and configuration options for each method.
 
 #### Condition-Based Temporal Censoring with Raw Data
 
@@ -139,7 +138,7 @@ connectomix /data/bids /data/output participant \
 
 | Argument | Short | Description | Example |
 |----------|-------|-------------|---------|
-| `--derivatives` | | Denoised derivatives location | `--derivatives fmridenoiser=/path/to/fmridenoiser` |
+| `--derivatives` | `-d` | Denoised derivatives location | `-d fmridenoiser=/path/to/fmridenoiser` |
 | `--participant-label` | `-p` | Subject(s) to process | `-p 01` |
 | `--task` | `-t` | Task name to process | `-t restingstate` |
 | `--session` | `-s` | Session to process | `-s 1` |
@@ -148,8 +147,11 @@ connectomix /data/bids /data/output participant \
 | `--config` | `-c` | Config file path | `-c my_config.yaml` |
 | `--atlas` | | Atlas for ROI connectivity | `--atlas schaefer2018n200` |
 | `--method` | | Connectivity method | `--method roiToRoi` |
-| `--denoising` | | Predefined strategy | `--denoising csfwm_6p` |
-| `--derivatives` | `-d` | Derivative locations | `-d fmriprep=/path` |
+| `--roi-atlas` | | Atlas for roi-to-voxel method | `--roi-atlas schaefer_100` |
+| `--roi-label` | | ROI label(s) from atlas or mask | `--roi-label 7Networks_DMN_PCC` |
+| `--roi-mask` | | Path to binary ROI mask file(s) | `--roi-mask /path/to/roi.nii.gz` |
+| `--conditions` | | Task conditions for temporal masking | `--conditions face house` |
+| `--events-file` | | Path to events.tsv file (optional) | `--events-file events.tsv` |
 | `--label` | | Custom output label | `--label myanalysis` |
 | `--verbose` | `-v` | Enable debug output | `-v` |
 
@@ -311,233 +313,7 @@ export NILEARN_DATA=/custom/atlas/path
 connectomix /path/to/fmridenoiser_output /data/output participant --atlas schaefer2018n100
 ```
 
-#### Docker/Container Usage
-
-If running Connectomix in a Docker container, pre-populate the atlas cache in the image:
-
-```dockerfile
-FROM python:3.9
-
-# Install Connectomix
-RUN git clone https://github.com/ln2t/connectomix.git && \
-    cd connectomix && \
-    pip install -e .
-
-# Pre-download atlases at build time
-RUN mkdir -p ~/nilearn_data/schaefer_2018 && \
-    curl -o ~/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz \
-    https://raw.githubusercontent.com/ThomasYeoLab/CBIG/v0.14.3-Update_Yeo2011_Schaefer2018_labelname/stable_projects/brain_parcellation/Schaefer2018_LocalGlobal/Parcellations/MNI/Schaefer2018_100Parcels_7Networks_order_FSLMNI152_2mm.nii.gz && \
-    curl -o ~/nilearn_data/schaefer_2018/Schaefer2018_100Parcels_7Networks_order.txt \
-    https://raw.githubusercontent.com/ThomasYeoLab/CBIG/v0.14.3-Update_Yeo2011_Schaefer2018_labelname/stable_projects/brain_parcellation/Schaefer2018_LocalGlobal/Parcellations/MNI/Schaefer2018_100Parcels_7Networks_order.txt
-```
-
-Then run the container with the pre-cached data:
-
-```bash
-docker run -v ~/nilearn_data:/root/nilearn_data -v /data:/data myimage \
-  connectomix /path/to/fmridenoiser_output /data/output participant --atlas schaefer2018n100
-```
-
 ---
-
-## Analysis Methods
-
-Connectomix supports four connectivity analysis methods:
-
-### 1. Seed-to-Voxel
-
-Compute correlation between user-defined seed regions and all brain voxels.
-
-**Option A: Seeds from TSV file**
-
-```yaml
-method: "seedToVoxel"
-seeds_file: "seeds.tsv"  # Tab-separated: name, x, y, z
-radius: 5.0              # Sphere radius in mm
-```
-
-**Seeds file format (seeds.tsv):**
-```tsv
-name	x	y	z
-PCC	0	-52	18
-mPFC	0	52	0
-LIPL	-45	-70	35
-```
-
-**Option B: Seeds defined in configuration**
-
-```yaml
-method: "seedToVoxel"
-seeds:
-  - name: "PCC"
-    x: 0
-    y: -52
-    z: 18
-  - name: "mPFC"
-    x: 0
-    y: 52
-    z: 0
-  - name: "LIPL"
-    x: -45
-    y: -70
-    z: 35
-radius: 5.0  # Sphere radius in mm
-```
-
-**Output:** One NIfTI per seed with correlation values at each voxel.
-
-### 2. ROI-to-Voxel
-
-Compute correlation between ROI regions and all brain voxels. ROIs can be specified flexibly from either:
-- **Mask files**: Binary NIfTI images defining ROI regions (requires `--roi-label` for naming)
-- **Atlas labels**: Extract ROI from a standard atlas by label name
-
-**Option A: ROI masks from files**
-
-```yaml
-method: "roiToVoxel"
-roi_masks: ["/path/to/putamen.nii.gz", "/path/to/caudate.nii.gz"]
-roi_label: ["putamen", "caudate"]  # Required: one label per mask for output naming
-```
-
-**Option B: ROI extracted from atlas by label**
-
-```yaml
-method: "roiToVoxel"
-roi_atlas: "schaefer_100"
-roi_label: 
-  - "7Networks_DMN_PCC"
-  - "7Networks_DMN_mPFC"
-  - "7Networks_DAN_FEF_L"
-```
-
-**Command-line alternatives:**
-
-```bash
-# Using mask files (--roi-label required for naming outputs)
-connectomix /bids /output participant \
-  --method roiToVoxel \
-  --roi-mask /path/to/putamen.nii.gz /path/to/caudate.nii.gz \
-  --roi-label putamen caudate
-
-# Using atlas labels
-connectomix /bids /output participant \
-  --method roiToVoxel \
-  --roi-atlas schaefer_100 \
-  --roi-label 7Networks_DMN_PCC 7Networks_DMN_mPFC
-```
-
-**Available atlases for atlas-based ROI extraction:**
-- `schaefer_100`, `schaefer_200`, `schaefer_400` - Functional parcellations (7 networks)
-- `schaefer_100_17`, `schaefer_200_17`, `schaefer_400_17` - Functional parcellations (17 networks)
-- `aal` - Automated Anatomical Labeling (116 regions)
-- `harvard_oxford_cort` - Harvard-Oxford Cortical Atlas
-- `harvard_oxford_sub` - Harvard-Oxford Subcortical Atlas
-- `destrieux` - Destrieux Atlas (FreeSurfer-based)
-- `difumo_64`, `difumo_128` - Dictionary-based Functional Atlases
-- `msdl` - Multi-Subject Dictionary Learning Atlas
-
-**Output:** One NIfTI per ROI with effect size values at each voxel.
-
-### 3. Seed-to-Seed
-
-Compute correlation matrix between multiple seeds.
-
-**Option A: Seeds from TSV file**
-
-```yaml
-method: "seedToSeed"
-seeds_file: "seeds.tsv"
-radius: 5.0
-```
-
-**Option B: Seeds defined in configuration**
-
-```yaml
-method: "seedToSeed"
-seeds:
-  - name: "PCC"
-    x: 0
-    y: -52
-    z: 18
-  - name: "mPFC"
-    x: 0
-    y: 52
-    z: 0
-radius: 5.0
-```
-
-**Output:** N×N correlation matrix (numpy array).
-
-### 4. ROI-to-ROI
-
-Whole-brain parcellation-based connectivity matrix using a standard atlas.
-
-```yaml
-method: "roiToRoi"
-atlas: "schaefer2018n100"
-```
-
-**Output:** Multiple connectivity matrices (N×N where N = number of atlas regions):
-- `*_desc-correlation_connectivity.npy` - Pearson correlation
-- `*_desc-covariance_connectivity.npy` - Sample covariance
-- `*_desc-partial-correlation_connectivity.npy` - Partial correlation (controlling for other regions)
-- `*_desc-precision_connectivity.npy` - Inverse covariance (sparse direct connections)
-- `*_timeseries.npy` - Raw ROI time series for reanalysis
-
-### Available Connectivity Measures
-
-For ROI-to-ROI analysis, Connectomix computes **four complementary connectivity measures** to characterize brain network interactions:
-
-| Measure | Values | Interpretation |
-|---------|--------|----------------|
-| **Correlation** | -1 to +1 | Normalized covariance; strength & direction of linear relationship |
-| **Covariance** | Unbounded | Raw joint variability; retains variance magnitude information |
-| **Partial Correlation** | -1 to +1 | Correlation controlling for all other regions; reveals direct connections |
-| **Precision** | Unbounded | Inverse covariance; sparse matrix revealing direct statistical dependencies |
-
-#### Pearson Correlation
-
-The most commonly used measure. Pearson correlation normalizes the covariance by the standard deviations, yielding values between -1 and +1 that indicate the strength and direction of the linear relationship between two regions.
-
-**Use when:** You want easily interpretable values; comparing connectivity across subjects with different signal variances.
-
-**Formula:** $\rho_{ij} = \frac{\text{Cov}(X_i, X_j)}{\sigma_i \sigma_j}$
-
-#### Covariance
-
-The sample covariance measures how two variables vary together, retaining information about the magnitude of variance. Unlike correlation, covariance is not normalized and can take any real value.
-
-**Use when:** Variance magnitude is meaningful for your analysis; you want to preserve amplitude information.
-
-**Formula:** $\text{Cov}(X_i, X_j) = \frac{1}{n-1}\sum_{t=1}^{n}(x_i^t - \bar{x}_i)(x_j^t - \bar{x}_j)$
-
-#### Partial Correlation
-
-Partial correlation measures the relationship between two regions while controlling for the influence of all other regions. This reveals direct connections by removing indirect effects mediated through other areas.
-
-**Use when:** You want to identify direct functional connections; distinguishing direct from indirect relationships.
-
-**Formula:** $\rho_{ij|Z} = -\frac{\Theta_{ij}}{\sqrt{\Theta_{ii}\Theta_{jj}}}$ where $\Theta$ is the precision matrix
-
-#### Precision (Inverse Covariance)
-
-The precision matrix is the inverse of the covariance matrix. It encodes conditional dependencies: if $\Theta_{ij} = 0$, regions i and j are conditionally independent given all other regions. This provides a sparse representation of direct statistical relationships.
-
-**Use when:** You want sparse networks; identifying direct statistical dependencies; graph-theoretical analyses.
-
-**Formula:** $\Theta = \Sigma^{-1}$
-
-> **Tip:** Correlation and partial correlation are normalized (-1 to +1) and easier to interpret. Covariance and precision preserve variance information but require careful interpretation across subjects.
-
-### Available Atlases
-
-| Name | Regions | Description |
-|------|---------|-------------|
-| `schaefer2018n100` | 100 | Schaefer 7-network 100 parcels |
-| `schaefer2018n200` | 200 | Schaefer 7-network 200 parcels |
-| `aal` | 116 | Automated Anatomical Labeling |
-| `harvardoxford` | 96 | Harvard-Oxford cortical + subcortical |
 
 ### Using a Custom Atlas
 
@@ -897,12 +673,18 @@ connectomix --help
 
 ---
 
-## License
-
-This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for details.
-
----
-
 ## Citation
 
 If you use Connectomix in your research, please refer to the [GitHub repository](https://github.com/ln2t/connectomix).
+
+---
+
+## Acknowledgments
+
+Connectomix is built on [Nilearn](https://nilearn.github.io/), a powerful Python library for analyzing neuroimaging data. For questions about connectivity measures and neuroimaging analysis, refer to the [Nilearn documentation](https://nilearn.github.io/).
+
+---
+
+## License
+
+This project is licensed under the GNU Affero General Public License v3.0 (AGPL-3.0). See [LICENSE](LICENSE) for details.
