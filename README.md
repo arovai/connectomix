@@ -1,4 +1,5 @@
 <p align="center">
+  
   # Connectomix
   
   <strong>Functional Connectivity Analysis from fmridenoiser Outputs</strong>
