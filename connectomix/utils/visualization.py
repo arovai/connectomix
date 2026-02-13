@@ -588,10 +588,13 @@ def _create_seed_sphere(
     
     # Get the shape and affine from reference image
     ref_data = reference_img.get_fdata()
+    # Ensure we work with 3D data (squeeze if 4D with singleton time dimension)
+    if ref_data.ndim == 4:
+        ref_data = np.squeeze(ref_data)
     ref_affine = reference_img.affine
     
-    # Create an empty sphere mask
-    sphere_data = np.zeros_like(ref_data)
+    # Create an empty sphere mask (3D only)
+    sphere_data = np.zeros(ref_data.shape[:3], dtype=np.float32)
     
     # Get inverse affine to convert MNI coords to voxel indices
     inv_affine = np.linalg.inv(ref_affine)
@@ -600,8 +603,8 @@ def _create_seed_sphere(
     seed_voxel = inv_affine @ np.array([*seed_coords, 1])
     seed_voxel = seed_voxel[:3]  # Drop homogeneous coordinate
     
-    # Create distance matrix for all voxels
-    indices = np.indices(ref_data.shape)
+    # Create distance matrix for all voxels (use sphere_data.shape to ensure 3D)
+    indices = np.indices(sphere_data.shape)
     distances = np.sqrt(
         (indices[0] - seed_voxel[0])**2 +
         (indices[1] - seed_voxel[1])**2 +
@@ -617,8 +620,10 @@ def _create_seed_sphere(
     # Create binary sphere mask
     sphere_data[distances <= radius_voxels] = 1.0
     
-    # Create NIfTI image with same affine as reference
-    sphere_img = nib.Nifti1Image(sphere_data, affine=ref_affine)
+    # Create NIfTI image with same affine and header as reference
+    # Use the reference image's header for full compatibility
+    ref_header = reference_img.header.copy() if hasattr(reference_img, 'header') else None
+    sphere_img = nib.Nifti1Image(sphere_data, affine=ref_affine, header=ref_header)
     
     return sphere_img
 

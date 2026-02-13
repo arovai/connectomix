@@ -1,0 +1,78 @@
+# Connectomix Configuration: ROI-to-Voxel with Mask Files
+#
+# This configuration demonstrates ROI-to-voxel connectivity analysis
+# with ROIs defined by binary mask files.
+#
+# Usage:
+#   connectomix /path/to/bids /path/to/output participant --config roi_to_voxel_masks.yaml
+
+# BIDS Entity Filters
+# ==================
+# Filter which data to process from your BIDS dataset
+
+subject: ["01"]                    # Subject IDs (without "sub-" prefix)
+tasks: ["rest"]                    # Task names
+sessions: null                     # Session IDs (null = all sessions)
+runs: null                         # Run numbers (null = all runs)
+spaces: ["MNI152NLin2009cAsym"]   # MNI spaces to use
+
+# Analysis Method
+# ===============
+method: "roiToVoxel"
+
+# ROI-to-Voxel Configuration
+# ==========================
+# OPTION: Define ROIs from binary mask files
+# Specify full paths to binary NIfTI mask images
+# IMPORTANT: roi_label is required for each mask to name outputs
+
+roi_masks:
+  - "/path/to/my_roi_pcc_mask.nii.gz"        # Posterior Cingulate Cortex mask
+  - "/path/to/my_roi_mpfc_mask.nii.gz"       # Medial Prefrontal Cortex mask
+  - "/path/to/my_roi_fef_left_mask.nii.gz"   # Left Frontal Eye Field mask
+
+roi_label:                                     # REQUIRED: Labels for output naming (one per mask)
+  - "PCC"                                      # Label for PCC mask outputs
+  - "mPFC"                                     # Label for mPFC mask outputs  
+  - "FEF_left"                                 # Label for FEF left mask outputs
+
+# Denoised Data Location
+# ======================
+denoised_derivatives: null         # Path to denoised data (if not using --derivatives flag)
+
+# Output Options
+# ==============
+label: null                        # Custom label for output filenames (optional)
+
+# Connectivity Computation
+# ========================
+connectivity_kind: "correlation"   # Type of connectivity measure ("correlation", "covariance", etc.)
+
+# Temporal Censoring (Optional)
+# =============================
+# Uncomment to enable condition-based analysis or motion censoring
+condition_masking:
+  enabled: false
+  # events_file: "auto"           # Auto-detect from BIDS, or provide explicit path
+  # conditions: ["rest"]           # Condition names to include (empty = all)
+  # transition_buffer: 0.0         # Seconds to exclude around boundaries
+  # min_volumes_retained: 50       # Minimum volumes required
+  # min_fraction_retained: 0.3     # Minimum fraction of volumes
+
+# Advanced Options (Usually not needed)
+# ======================================
+# Advanced options are preserved for backward compatibility but not required
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# MASK FILE REQUIREMENTS
+# ═══════════════════════════════════════════════════════════════════════════════
+#
+# - Must be binary NIfTI images (.nii or .nii.gz)
+# - Should be in the same space as the functional data
+# - Values > 0 define the ROI region (voxels with value 0 are excluded)
+# - Automatic resampling to match functional image dimensions
+# - Filename (without extension) will be used as ROI name in outputs
+#
+# If masks are in different space/resolution, they will be automatically
+# resampled to match the functional image.
+# ═══════════════════════════════════════════════════════════════════════════════

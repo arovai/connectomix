@@ -141,11 +141,11 @@ def extract_single_region_timeseries(
             verbose=0
         )
         
-        # Extract time series (average across voxels)
+        # Extract time series (NiftiMasker returns all voxels: n_timepoints x n_voxels)
         time_series = masker.fit_transform(func_img)
         
-        # Should be shape (n_timepoints, 1), flatten to (n_timepoints,)
-        time_series = time_series.flatten()
+        # Average across voxels to get single time series
+        time_series = time_series.mean(axis=1)
         
         if logger:
             logger.debug(f"  Extracted shape: {time_series.shape}")

@@ -58,8 +58,9 @@ def create_parser() -> argparse.ArgumentParser:
       Input data must be pre-denoised (e.g., from fmridenoiser or similar denoising pipeline).
     
     {Colors.BOLD}Connectivity Methods:{Colors.END}
-      • {Colors.CYAN}seed-to-voxel{Colors.END}  - Correlation between seed regions and all brain voxels
-      • {Colors.CYAN}roi-to-voxel{Colors.END}   - Correlation between atlas ROIs and all brain voxels
+      • {Colors.CYAN}seed-to-voxel{Colors.END}  - Correlation between seed spheres and all brain voxels
+      • {Colors.CYAN}roi-to-voxel{Colors.END}   - Correlation between ROIs and all brain voxels
+                         (ROI from atlas label OR mask file)
       • {Colors.CYAN}seed-to-seed{Colors.END}   - Correlation matrix between user-defined seeds
       • {Colors.CYAN}roi-to-roi{Colors.END}     - Correlation matrix between atlas regions
     
@@ -337,15 +338,51 @@ def create_parser() -> argparse.ArgumentParser:
     # =========================================================================
     analysis_opts = parser.add_argument_group(
         f'{Colors.BOLD}Analysis Options{Colors.END}',
-        "Connectivity method and atlas selection."
+        "Connectivity method and ROI specification."
     )
     
     analysis_opts.add_argument(
         "--atlas",
         metavar="ATLAS",
-        help="Atlas for ROI-to-ROI connectivity. "
-             "Available: schaefer2018n100, schaefer2018n200, aal, harvardoxford. "
-             "Default: schaefer2018n100.",
+        help="Atlas for ROI-based connectivity methods (roi-to-roi, roi-to-voxel). "
+             "Available: schaefer_100, schaefer_200, schaefer_400, "
+             "schaefer_100_17, schaefer_200_17, aal, harvard_oxford_cort, "
+             "harvard_oxford_sub, destrieux, difumo_64, difumo_128, msdl. "
+             "Default: schaefer_100. "
+             "Used with --roi-atlas option for roi-to-voxel.",
+    )
+    
+    analysis_opts.add_argument(
+        "--roi-atlas",
+        metavar="ATLAS",
+        dest="roi_atlas",
+        help="Atlas name for roi-to-voxel method (alternative to --roi-mask). "
+             "Use with --roi-label to specify ROI labels. Uses same atlas list as --atlas. "
+             "Example: --roi-atlas schaefer_100 --roi-label '7Networks_DMN_PCC'",
+    )
+    
+    analysis_opts.add_argument(
+        "--roi-label",
+        metavar="LABEL",
+        dest="roi_label",
+        nargs="+",
+        help="ROI label(s) for roi-to-voxel method. "
+             "Required when using --roi-mask (one label per mask file). "
+             "When using --roi-atlas, specifies which ROI(s) to extract from the atlas. "
+             "Can specify multiple labels for batch processing. "
+             "Case-insensitive. "
+             "Examples: --roi-label putamen (for --roi-mask putamen.nii.gz) "
+             "or --roi-label 7Networks_DMN_PCC 7Networks_DMN_mPFC (for --roi-atlas)",
+    )
+    
+    analysis_opts.add_argument(
+        "--roi-mask",
+        metavar="FILE",
+        dest="roi_masks",
+        nargs="+",
+        help="Path(s) to binary mask file(s) for roi-to-voxel method (alternative to --roi-atlas). "
+             "Specify full path(s) to NIfTI mask image(s). "
+             "Example: --roi-mask /path/to/roi1.nii.gz /path/to/roi2.nii.gz",
     )
     
     analysis_opts.add_argument(
@@ -353,7 +390,8 @@ def create_parser() -> argparse.ArgumentParser:
         metavar="METHOD",
         choices=["seedToVoxel", "roiToVoxel", "seedToSeed", "roiToRoi"],
         help="Connectivity method. "
-             "Choices: %(choices)s. Default: roiToRoi.",
+             "Choices: %(choices)s. Default: roiToRoi. "
+             "roiToVoxel requires: --roi-atlas+--roi-label OR --roi-mask+--roi-label.",
     )
     
     return parser

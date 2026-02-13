@@ -7,10 +7,119 @@ import numpy as np
 import pandas as pd
 import nibabel as nib
 from nilearn.glm.first_level import FirstLevelModel
+from nilearn import image
+import matplotlib.pyplot as plt
+from scipy import ndimage
 
 from connectomix.connectivity.extraction import extract_seeds_timeseries
 from connectomix.io.writers import save_nifti_with_sidecar
 from connectomix.utils.exceptions import ConnectivityError
+from connectomix.utils.validation import sanitize_filename
+
+
+
+def compute_glm_contrast_map(
+    func_img: nib.Nifti1Image,
+    timeseries: np.ndarray,
+    region_name: str,
+    output_path: Path,
+    brain_mask: Optional[nib.Nifti1Image] = None,
+    regressor_name: str = 'regressor',
+    logger: Optional[logging.Logger] = None,
+    t_r: Optional[float] = None,
+    metadata: Optional[Dict] = None,
+) -> nib.Nifti1Image:
+    """Compute GLM-based connectivity map from a timeseries.
+    
+    This is the shared GLM computation used by both seed-to-voxel and ROI-to-voxel.
+    Performs only GLM computation and saves NIfTI + metadata. Visualization is handled
+    separately by the calling functions.
+    
+    Args:
+        func_img: Functional image (4D)
+        timeseries: Extracted region timeseries, shape (n_timepoints,)
+        region_name: Name of region (for logging and metadata)
+        output_path: Path for output effect size map
+        brain_mask: Brain mask image restricting analysis to brain voxels
+        regressor_name: Name of the regressor column (for logging)
+        logger: Optional logger instance
+        t_r: Repetition time in seconds
+        metadata: Optional metadata dictionary (will be merged with defaults)
+    
+    Returns:
+        Effect size map as NIfTI image
+    
+    Raises:
+        ConnectivityError: If analysis fails
+    """
+    try:
+        # Create design matrix with region time series as regressor
+        n_scans = len(timeseries)
+        design_matrix = pd.DataFrame(
+            np.column_stack([timeseries, np.ones(n_scans)]),
+            columns=[regressor_name, 'intercept']
+        )
+        
+        # Fit GLM
+        if logger:
+            logger.debug("  Fitting GLM...")
+        
+        glm_model = FirstLevelModel(
+            t_r=t_r,
+            mask_img=brain_mask,
+            high_pass=None,  # Already filtered
+            smoothing_fwhm=None,  # No additional smoothing
+            standardize=False,  # Already standardized
+            minimize_memory=False
+        )
+        
+        glm_model.fit(func_img, design_matrices=[design_matrix])
+        
+        # Compute contrast for regressor (first column)
+        if logger:
+            logger.debug("  Computing effect size contrast...")
+        
+        contrast = np.array([1, 0])  # Effect of regressor, not intercept
+        
+        effect_size_map = glm_model.compute_contrast(
+            contrast,
+            output_type='effect_size'
+        )
+        
+        # Validate effect size map
+        effect_data = effect_size_map.get_fdata()
+        if logger:
+            logger.debug(f"  Effect size map stats: mean={effect_data.mean():.6f}, "
+                        f"std={effect_data.std():.6f}, range=[{effect_data.min():.6f}, {effect_data.max():.6f}]")
+        
+        if np.allclose(effect_data, 0):
+            raise ConnectivityError(
+                f"Effect size map for {region_name} is all zeros. "
+                f"The GLM may have failed to compute coefficients. "
+                f"Check if the functional image has sufficient variability."
+            )
+        
+        # Prepare metadata
+        default_metadata = {
+            'RegionName': region_name,
+            'ContrastType': 'effect_size',
+            'Description': f'Connectivity map for {region_name}'
+        }
+        if metadata:
+            default_metadata.update(metadata)
+        
+        # Save effect size map
+        save_nifti_with_sidecar(effect_size_map, output_path, default_metadata)
+        
+        if logger:
+            logger.info(f"  Saved effect size map: {output_path.name}")
+        
+        return effect_size_map
+    
+    except ConnectivityError:
+        raise
+    except Exception as e:
+        raise ConnectivityError(f"GLM-based connectivity analysis failed for {region_name}: {e}")
 
 
 def find_masks_directory(denoised_func_path: Path) -> Path:
@@ -219,71 +328,98 @@ def compute_seed_to_voxel(
                 f"Check if seed is outside the functional image."
             )
         
-        # Create design matrix with seed time series as regressor
-        n_scans = len(seed_timeseries)
-        design_matrix = pd.DataFrame(
-            np.column_stack([seed_timeseries, np.ones(n_scans)]),
-            columns=['seed', 'intercept']
-        )
-        
-        # Fit GLM
-        if logger:
-            logger.debug("  Fitting GLM...")
-        
-        glm_model = FirstLevelModel(
-            t_r=t_r,
-            mask_img=brain_mask_img,
-            high_pass=None,  # Already filtered
-            smoothing_fwhm=None,  # No additional smoothing
-            standardize=False,  # Already standardized
-            minimize_memory=False
-        )
-        
-        glm_model.fit(func_img, design_matrices=[design_matrix])
-        
-        # Compute contrast for seed regressor (first column)
-        if logger:
-            logger.debug("  Computing effect size contrast...")
-        
-        contrast = np.array([1, 0])  # Effect of seed regressor, not intercept
-        
-        effect_size_map = glm_model.compute_contrast(
-            contrast,
-            output_type='effect_size'
-        )
-        
-        # Validate effect size map
-        effect_data = effect_size_map.get_fdata()
-        if logger:
-            logger.debug(f"  Effect size map stats: mean={effect_data.mean():.6f}, "
-                        f"std={effect_data.std():.6f}, range=[{effect_data.min():.6f}, {effect_data.max():.6f}]")
-        
-        if np.allclose(effect_data, 0):
-            raise ConnectivityError(
-                f"Effect size map for seed {seed_name} is all zeros. "
-                f"The GLM may have failed to compute coefficients. "
-                f"Check if the functional image has sufficient variability."
-            )
-        
-        # Save effect size map
+        # Use shared GLM computation function
         metadata = {
             'SeedName': seed_name,
             'SeedCoordinates_mm': seed_coords.flatten().tolist(),
             'SeedRadius_mm': radius,
+            'SeedCenterCoords_mm': seed_coords.flatten().tolist(),
             'AnalysisMethod': 'seedToVoxel',
-            'ContrastType': 'effect_size',
-            'Description': f'Seed-to-voxel connectivity map for {seed_name}'
         }
         
-        save_nifti_with_sidecar(effect_size_map, output_path, metadata)
+        effect_size_map = compute_glm_contrast_map(
+            func_img=func_img,
+            timeseries=seed_timeseries,
+            region_name=seed_name,
+            output_path=output_path,
+            brain_mask=brain_mask_img,
+            regressor_name='seed',
+            logger=logger,
+            t_r=t_r,
+            metadata=metadata,
+        )
         
-        if logger:
-            logger.info(f"  Saved effect size map: {output_path.name}")
+        # Create visualization with seed sphere overlay
+        try:
+            from nilearn import plotting as nplot
+            from connectomix.utils.visualization import _create_seed_sphere
+            import json
+            
+            # Use seed coordinates for cut_coords
+            cut_coords = tuple(seed_coords.flatten())
+            
+            # Create orthogonal plot
+            fig = plt.figure(figsize=(16, 5))
+            display = nplot.plot_stat_map(
+                effect_size_map,
+                threshold=0,
+                display_mode='ortho',
+                cut_coords=cut_coords,
+                colorbar=True,
+                cmap='cold_hot',
+                title=f"Connectivity Map - {seed_name}",
+                figure=fig,
+            )
+            
+            # Overlay seed sphere
+            try:
+                seed_sphere_img = _create_seed_sphere(effect_size_map, seed_coords.flatten(), radius)
+                
+                # Validate sphere has non-zero values
+                sphere_data = seed_sphere_img.get_fdata()
+                n_nonzero = np.sum(sphere_data > 0)
+                if logger:
+                    logger.debug(f"  Seed sphere: {n_nonzero} voxels, shape={sphere_data.shape}")
+                
+                if n_nonzero > 0:
+                    display.add_contours(
+                        seed_sphere_img,
+                        levels=[0.5],
+                        colors='lime',
+                        linewidths=2.0,
+                    )
+                    if logger:
+                        logger.debug(f"  Added seed sphere contours: coords={seed_coords.flatten()}, radius={radius}mm")
+                else:
+                    if logger:
+                        logger.warning(f"  Seed sphere is empty (no voxels), coords={seed_coords.flatten()}, radius={radius}mm")
+            except Exception as sphere_error:
+                if logger:
+                    logger.warning(f"  Could not overlay seed sphere: {sphere_error}")
+                    logger.debug(f"  Sphere error details:", exc_info=True)
+            
+            # Save plot to figures directory
+            # Remove .nii/.nii.gz extension and add .png
+            png_name = output_path.name.replace('.nii.gz', '').replace('.nii', '') + '.png'
+            plot_output = output_path.parent.parent / 'figures' / png_name
+            plot_output.parent.mkdir(parents=True, exist_ok=True)
+            fig.savefig(plot_output, dpi=100, bbox_inches='tight')
+            plt.close(fig)
+            
+            if logger:
+                logger.info(f"  Saved plot: {plot_output.name}")
+        
+        except Exception as plot_error:
+            if logger:
+                logger.warning(f"Could not create visualization: {plot_error}")
         
         return output_path
     
+    except ConnectivityError:
+        raise
     except Exception as e:
         raise ConnectivityError(f"Seed-to-voxel analysis failed for {seed_name}: {e}")
+
 
 
 def compute_multiple_seeds_to_voxel(
@@ -323,8 +459,9 @@ def compute_multiple_seeds_to_voxel(
     output_paths = []
     
     for seed_name, seed_coords in zip(seed_names, seed_coords_array):
-        # Build output path
-        output_filename = output_pattern.format(seed_name=seed_name)
+        # Build output path with sanitized seed_name to handle spaces and special characters
+        safe_seed_name = sanitize_filename(seed_name)
+        output_filename = output_pattern.format(seed_name=safe_seed_name)
         output_path = output_dir / output_filename
         
         # Compute connectivity

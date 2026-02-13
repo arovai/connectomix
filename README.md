@@ -435,14 +435,56 @@ radius: 5.0  # Sphere radius in mm
 
 ### 2. ROI-to-Voxel
 
-Like seed-to-voxel but with arbitrary ROI masks instead of spheres.
+Compute correlation between ROI regions and all brain voxels. ROIs can be specified flexibly from either:
+- **Mask files**: Binary NIfTI images defining ROI regions (requires `--roi-label` for naming)
+- **Atlas labels**: Extract ROI from a standard atlas by label name
+
+**Option A: ROI masks from files**
 
 ```yaml
 method: "roiToVoxel"
-roi_masks: ["/path/to/roi1.nii.gz", "/path/to/roi2.nii.gz"]
+roi_masks: ["/path/to/putamen.nii.gz", "/path/to/caudate.nii.gz"]
+roi_label: ["putamen", "caudate"]  # Required: one label per mask for output naming
 ```
 
-**Output:** One NIfTI per ROI with correlation values.
+**Option B: ROI extracted from atlas by label**
+
+```yaml
+method: "roiToVoxel"
+roi_atlas: "schaefer_100"
+roi_label: 
+  - "7Networks_DMN_PCC"
+  - "7Networks_DMN_mPFC"
+  - "7Networks_DAN_FEF_L"
+```
+
+**Command-line alternatives:**
+
+```bash
+# Using mask files (--roi-label required for naming outputs)
+connectomix /bids /output participant \
+  --method roiToVoxel \
+  --roi-mask /path/to/putamen.nii.gz /path/to/caudate.nii.gz \
+  --roi-label putamen caudate
+
+# Using atlas labels
+connectomix /bids /output participant \
+  --method roiToVoxel \
+  --roi-atlas schaefer_100 \
+  --roi-label 7Networks_DMN_PCC 7Networks_DMN_mPFC
+```
+
+**Available atlases for atlas-based ROI extraction:**
+- `schaefer_100`, `schaefer_200`, `schaefer_400` - Functional parcellations (7 networks)
+- `schaefer_100_17`, `schaefer_200_17`, `schaefer_400_17` - Functional parcellations (17 networks)
+- `aal` - Automated Anatomical Labeling (116 regions)
+- `harvard_oxford_cort` - Harvard-Oxford Cortical Atlas
+- `harvard_oxford_sub` - Harvard-Oxford Subcortical Atlas
+- `destrieux` - Destrieux Atlas (FreeSurfer-based)
+- `difumo_64`, `difumo_128` - Dictionary-based Functional Atlases
+- `msdl` - Multi-Subject Dictionary Learning Atlas
+
+**Output:** One NIfTI per ROI with effect size values at each voxel.
 
 ### 3. Seed-to-Seed
 

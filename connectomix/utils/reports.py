@@ -39,6 +39,7 @@ import seaborn as sns
 
 from connectomix.core.version import __version__
 from connectomix.utils.visualization import plot_lightbox_axial_slices
+from connectomix.utils.validation import sanitize_filename
 
 logger = logging.getLogger(__name__)
 
@@ -2233,7 +2234,7 @@ class ParticipantReportGenerator:
             <h2>🧠 Brain Maps</h2>
             <p>Axial slices showing voxel-wise connectivity strength for each seed/ROI. 
             Lighter colors indicate stronger connectivity (in either positive or negative direction).
-            Green sphere overlay indicates the seed region (center and radius).</p>
+            Green overlay indicates the seed region (sphere) or ROI region (mask boundary).</p>
         '''
         
         for item in self.brain_maps:
@@ -2249,27 +2250,59 @@ class ParticipantReportGenerator:
                 seed_radius = None
             
             try:
-                # Create stat map visualization centered at seed
-                fig = plot_lightbox_axial_slices(
-                    str(brain_map_path),
-                    seed_coords=seed_coords,
-                    seed_radius=seed_radius,
-                    title=f"Connectivity Map: {label}",
-                    n_slices=12,
-                    n_cols=3
-                )
+                # Try to read cut_coords from metadata sidecar
+                cut_coords_from_metadata = None
+                json_path = brain_map_path.with_suffix('.json')
+                if json_path.exists():
+                    try:
+                        import json
+                        with open(json_path, 'r') as f:
+                            metadata = json.load(f)
+                        # Try ROI center-of-mass first, then seed coordinates
+                        if 'ROI_CenterOfMass_mm' in metadata:
+                            cut_coords_from_metadata = tuple(metadata['ROI_CenterOfMass_mm'])
+                        elif 'SeedCenterCoords_mm' in metadata:
+                            cut_coords_from_metadata = tuple(metadata['SeedCenterCoords_mm'])
+                    except Exception as json_error:
+                        self._logger.debug(f"Could not read metadata from {json_path}: {json_error}")
                 
-                if fig is not None:
-                    fig_id = self._get_unique_figure_id()
-                    img_data = self._figure_to_base64(fig, dpi=150)
-                    
-                    # Save figure to disk
-                    saved_fig_path = self._save_figure_to_disk(
-                        fig, 'brainmap', f'lightbox-{label.replace(" ", "-")}', dpi=150
+                # Check if a pre-computed PNG exists from compute_glm_contrast_map()
+                # Remove .nii/.nii.gz extension properly before adding .png
+                png_name = brain_map_path.name.replace('.nii.gz', '').replace('.nii', '') + '.png'
+                precomputed_png = brain_map_path.parent.parent / 'figures' / png_name
+                img_data = None
+                actual_fig_filename = None
+                
+                if precomputed_png.exists():
+                    # Use the pre-computed PNG with correct coordinates
+                    import base64
+                    try:
+                        with open(precomputed_png, 'rb') as f:
+                            img_data = base64.b64encode(f.read()).decode('utf-8')
+                        actual_fig_filename = precomputed_png.name
+                        self._logger.debug(f"Using pre-computed PNG: {precomputed_png.name}")
+                    except Exception as png_error:
+                        self._logger.warning(f"Could not read pre-computed PNG: {png_error}")
+                
+                # If pre-computed PNG not available, generate lightbox visualization as fallback
+                if img_data is None:
+                    plot_seed_coords = cut_coords_from_metadata if cut_coords_from_metadata else seed_coords
+                    fig = plot_lightbox_axial_slices(
+                        str(brain_map_path),
+                        seed_coords=plot_seed_coords,
+                        seed_radius=seed_radius,
+                        title=f"Connectivity Map: {label}",
+                        n_slices=12,
+                        n_cols=3
                     )
-                    actual_fig_filename = saved_fig_path.name if saved_fig_path else 'brainmap.png'
                     
-                    plt.close(fig)
+                    if fig is not None:
+                        img_data = self._figure_to_base64(fig, dpi=150)
+                        actual_fig_filename = f'brainmap-{label.replace(" ", "-")}.png'
+                        plt.close(fig)
+                
+                if img_data is not None:
+                    fig_id = self._get_unique_figure_id()
                     
                     # Load NIfTI to get statistics
                     import nibabel as nib
@@ -2391,6 +2424,96 @@ class ParticipantReportGenerator:
         '''
         return html
     
+    def _format_command_for_display(self, command: str) -> str:
+        """Format CLI command with line breaks for readability.
+        
+        Breaks long command lines at argument boundaries to make them easier
+        to read and copy in the report.
+        
+        Parameters
+        ----------
+        command : str
+            Raw command line string.
+        
+        Returns
+        -------
+        str
+            Formatted command with line breaks and proper indentation.
+        """
+        # Split the command into logical groups
+        # Base command stays on first line
+        parts = command.split()
+        
+        if len(parts) <= 4:
+            # Short commands fit on one line
+            return command
+        
+        # Start with base command (connectomix /path /path/to/output participant)
+        formatted_lines = [" ".join(parts[:4])]
+        
+        # Group remaining arguments by category for readability
+        remaining_args = parts[4:]
+        
+        # Known argument groups for logical organization
+        arg_groups = {
+            'filter': ['--participant-label', '--task', '--session', '--run'],
+            'method': ['--method', '--atlas', '--roi-atlas', '--roi-mask', '--roi-label',
+                      '--seeds-file', '--radius'],
+            'connectivity': ['--connectivity-kind'],
+            'canica': ['--n-components', '--canica-threshold', '--canica-min-region-size'],
+            'temporal': ['--drop-initial', '--conditions', '--transition-buffer'],
+            'output': ['--label', '--derivatives'],
+        }
+        
+        # Track which arguments have been used
+        used_args = set()
+        
+        # Add arguments in logical groups
+        for group_name, group_keywords in arg_groups.items():
+            group_args = []
+            i = 0
+            while i < len(remaining_args):
+                arg = remaining_args[i]
+                
+                # Check if this arg matches any in the current group
+                if any(arg == keyword or arg.startswith(keyword) 
+                      for keyword in group_keywords):
+                    # Collect the argument and its value(s)
+                    arg_with_value = [arg]
+                    i += 1
+                    
+                    # Collect values for this argument
+                    while i < len(remaining_args) and not remaining_args[i].startswith('--'):
+                        arg_with_value.append(remaining_args[i])
+                        i += 1
+                    
+                    group_args.append(" ".join(arg_with_value))
+                    used_args.add(arg)
+                else:
+                    i += 1
+            
+            if group_args:
+                formatted_lines.append("    " + " ".join(group_args))
+        
+        # Add any remaining arguments that weren't categorized
+        remaining = []
+        i = 0
+        while i < len(remaining_args):
+            if remaining_args[i] not in used_args:
+                arg_with_value = [remaining_args[i]]
+                i += 1
+                while i < len(remaining_args) and not remaining_args[i].startswith('--'):
+                    arg_with_value.append(remaining_args[i])
+                    i += 1
+                remaining.append(" ".join(arg_with_value))
+            else:
+                i += 1
+        
+        if remaining:
+            formatted_lines.append("    " + " ".join(remaining))
+        
+        return " \\\n".join(formatted_lines)
+    
     def _build_command_section(self) -> str:
         """Build command line / configuration section."""
         self.toc_items.append(("reproducibility", "Reproducibility"))
@@ -2403,10 +2526,17 @@ class ParticipantReportGenerator:
         '''
         
         if self.command_line:
+            # Format the command for better readability in the report
+            formatted_cmd = self._format_command_for_display(self.command_line)
             html += f'''
             <h3>Command Line</h3>
+            <p style="font-size: 0.9em; color: #666;">
+                <em>Note: Paths are replaced with placeholders for portability.
+                Replace <code>/path/to/rawdata</code>, <code>/path/to/derivatives</code>,
+                and mask paths with actual paths on your system.</em>
+            </p>
             <div class="code-block">
-{self.command_line}
+{formatted_cmd}
             </div>
             '''
         
@@ -2602,36 +2732,44 @@ class ParticipantReportGenerator:
         # Get denoising strategy if set
         denoising_strategy = getattr(self.config, 'denoising_strategy', None)
         
-        if self.subject_id.startswith('sub-'):
-            filename = self.subject_id
-            if denoising_strategy:
-                filename += f"_denoise-{denoising_strategy}"
-            if self.censoring:
-                filename += f"_censoring-{self.censoring}"
-            if self.condition:
-                filename += f"_condition-{self.condition}"
-            if self.label:
-                filename += f"_label-{self.label}"
-            if self.desc:
-                filename += f"_desc-{self.desc}"
+        # Sanitize all components for safe filenames
+        safe_subject_id = sanitize_filename(self.subject_id)
+        safe_denoising_strategy = sanitize_filename(denoising_strategy) if denoising_strategy else None
+        safe_censoring = sanitize_filename(self.censoring) if self.censoring else None
+        safe_condition = sanitize_filename(self.condition) if self.condition else None
+        safe_label = sanitize_filename(self.label) if self.label else None
+        safe_desc = sanitize_filename(self.desc) if self.desc else None
+        
+        if safe_subject_id.startswith('sub-'):
+            filename = safe_subject_id
+            if safe_denoising_strategy:
+                filename += f"_denoise-{safe_denoising_strategy}"
+            if safe_censoring:
+                filename += f"_censoring-{safe_censoring}"
+            if safe_condition:
+                filename += f"_condition-{safe_condition}"
+            if safe_label:
+                filename += f"_label-{safe_label}"
+            if safe_desc:
+                filename += f"_desc-{safe_desc}"
             filename += "_report.html"
             report_path = output_path / filename
         else:
-            filename_parts = [f"sub-{self.subject_id}"]
+            filename_parts = [f"sub-{safe_subject_id}"]
             if self.session:
-                filename_parts.append(f"ses-{self.session}")
+                filename_parts.append(f"ses-{sanitize_filename(self.session)}")
             if self.task:
-                filename_parts.append(f"task-{self.task}")
-            if denoising_strategy:
-                filename_parts.append(f"denoise-{denoising_strategy}")
-            if self.censoring:
-                filename_parts.append(f"censoring-{self.censoring}")
-            if self.condition:
-                filename_parts.append(f"condition-{self.condition}")
-            if self.label:
-                filename_parts.append(f"label-{self.label}")
-            if self.desc:
-                filename_parts.append(f"desc-{self.desc}")
+                filename_parts.append(f"task-{sanitize_filename(self.task)}")
+            if safe_denoising_strategy:
+                filename_parts.append(f"denoise-{safe_denoising_strategy}")
+            if safe_censoring:
+                filename_parts.append(f"censoring-{safe_censoring}")
+            if safe_condition:
+                filename_parts.append(f"condition-{safe_condition}")
+            if safe_label:
+                filename_parts.append(f"label-{safe_label}")
+            if safe_desc:
+                filename_parts.append(f"desc-{safe_desc}")
             filename_parts.append("report.html")
             report_path = output_path / "_".join(filename_parts)
         

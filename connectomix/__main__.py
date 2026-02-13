@@ -89,6 +89,16 @@ def main():
                     if args.method:
                         config.method = args.method
                     
+                    # Handle ROI-to-voxel specific CLI arguments
+                    if hasattr(args, 'roi_masks') and args.roi_masks:
+                        config.roi_masks = [Path(m) for m in args.roi_masks]
+                    
+                    if hasattr(args, 'roi_atlas') and args.roi_atlas:
+                        config.roi_atlas = args.roi_atlas
+                    
+                    if hasattr(args, 'roi_label') and args.roi_label:
+                        config.roi_label = args.roi_label
+                    
                     # Handle condition-based masking CLI options
                     # For each loop iteration, pass only the current condition
                     _configure_condition_masking(args, config, logger, condition)

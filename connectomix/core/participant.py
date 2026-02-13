@@ -242,6 +242,18 @@ def run_participant_pipeline(
                 censor = None
                 censoring_summary = None
                 
+                # Extract TR from metadata (needed for GLM-based methods)
+                json_path = func_path.with_suffix('').with_suffix('.json')
+                if json_path.exists():
+                    t_r = get_repetition_time(json_path)
+                else:
+                    # Try to get TR from NIfTI header
+                    if len(denoised_img.header.get_zooms()) > 3:
+                        t_r = float(denoised_img.header.get_zooms()[3])
+                    else:
+                        t_r = 2.0  # Default assumption
+                        logger.debug(f"Could not determine TR, assuming {t_r}s")
+                
                 if config.temporal_censoring.enabled:
                     censor, censoring_summary = _apply_temporal_censoring(
                         denoised_img=denoised_img,
@@ -301,6 +313,7 @@ def run_participant_pipeline(
                             atlas_labels=atlas_labels,
                             atlas_coords=atlas_coords,
                             logger=logger,
+                            t_r=t_r,
                             denoised_func_path=denoised_func_path,
                         )
                         outputs['connectivity'].extend(connectivity_paths_cond)
@@ -329,6 +342,7 @@ def run_participant_pipeline(
                         atlas_labels=atlas_labels,
                         atlas_coords=atlas_coords,
                         logger=logger,
+                        t_r=t_r,
                         denoised_func_path=denoised_func_path,
                     )
                     outputs['connectivity'].extend(connectivity_paths_single)
@@ -384,23 +398,29 @@ def _build_cli_command(
     config: ParticipantConfig,
     file_entities: Dict[str, str],
 ) -> str:
-    """Build a generic CLI command from the configuration for reproducibility.
+    """Build a complete, reproducible CLI command from the configuration.
     
-    Paths are replaced with placeholders to avoid exposing user-specific paths.
+    Reconstructs the exact command-line arguments needed to reproduce this
+    analysis. Paths are replaced with generic placeholders to avoid exposing
+    user-specific directory structures.
     
     Parameters
     ----------
     config : ParticipantConfig
-        Configuration object.
+        Configuration object with all analysis parameters.
     file_entities : dict
-        BIDS entities for the current file.
+        BIDS entities (subject, session, task, run, etc.) for the current file.
     
     Returns
     -------
     str
-        CLI command with generic path placeholders.
+        Complete CLI command with placeholders for paths, formatted for easy copying.
     """
     parts = ["connectomix /path/to/rawdata /path/to/derivatives participant"]
+    
+    # ========================================================================
+    # BIDS Data Filters
+    # ========================================================================
     
     # Add participant label (check both 'subject' and 'sub' keys)
     subject = file_entities.get('subject') or file_entities.get('sub')
@@ -422,34 +442,103 @@ def _build_cli_command(
     if run:
         parts.append(f"--run {run}")
     
+    # ========================================================================
+    # Analysis Method and Method-Specific Arguments
+    # ========================================================================
+    
     # Add method
     parts.append(f"--method {config.method}")
     
-    # Add atlas for ROI methods
-    if config.method in ["roiToRoi", "seedToSeed"] and config.atlas:
-        parts.append(f"--atlas {config.atlas}")
+    # Add method-specific parameters
+    if config.method in ["seedToVoxel", "seedToSeed"]:
+        # Seed-based methods
+        if config.seeds_file:
+            parts.append(f"--seeds-file /path/to/seeds.tsv")
+        
+        if config.radius != 5.0:  # Only add if non-default
+            parts.append(f"--radius {config.radius}")
+        
+        if config.method == "seedToSeed" and config.atlas:
+            parts.append(f"--atlas {config.atlas}")
     
-    # Add temporal censoring and condition masking options
+    elif config.method == "roiToVoxel":
+        # ROI-to-voxel method
+        if config.roi_atlas:
+            parts.append(f"--roi-atlas {config.roi_atlas}")
+        
+        if config.roi_masks:
+            # Replace actual paths with generic placeholder
+            parts.append(f"--roi-mask /path/to/roi1.nii.gz /path/to/roi2.nii.gz")
+        
+        if config.roi_label:
+            label_str = " ".join(config.roi_label)
+            parts.append(f"--roi-label {label_str}")
+    
+    elif config.method == "roiToRoi":
+        # ROI-to-ROI method
+        if config.atlas:
+            parts.append(f"--atlas {config.atlas}")
+    
+    # ========================================================================
+    # Connectivity Options
+    # ========================================================================
+    
+    if config.connectivity_kind and config.connectivity_kind != "correlation":
+        parts.append(f"--connectivity-kind {config.connectivity_kind}")
+    
+    # ========================================================================
+    # CanICA Parameters (if using CanICA)
+    # ========================================================================
+    
+    if config.method == "roiToRoi" and config.atlas and config.atlas.lower() == "canica":
+        parts.append(f"--n-components {config.n_components}")
+        
+        if config.canica_threshold != 1.0:
+            parts.append(f"--canica-threshold {config.canica_threshold}")
+        
+        if config.canica_min_region_size != 50:
+            parts.append(f"--canica-min-region-size {config.canica_min_region_size}")
+    
+    # ========================================================================
+    # Temporal Processing Options
+    # ========================================================================
+    
+    # Temporal censoring (deprecated but kept for backward compatibility)
     if config.temporal_censoring.enabled:
         tc = config.temporal_censoring
         
         if tc.drop_initial_volumes > 0:
             parts.append(f"--drop-initial {tc.drop_initial_volumes}")
     
-    # Add condition masking options (from condition_masking config - primary)
-    if config.condition_masking.enabled and config.condition_masking.conditions:
-        conditions_str = " ".join(config.condition_masking.conditions)
-        parts.append(f"--conditions {conditions_str}")
+    # ========================================================================
+    # Condition Masking (Task fMRI)
+    # ========================================================================
     
-    # Add transition buffer if condition masking is enabled
-    if config.condition_masking.enabled and config.condition_masking.transition_buffer > 0:
-        parts.append(f"--transition-buffer {config.condition_masking.transition_buffer}")
+    if config.condition_masking.enabled:
+        cm = config.condition_masking
+        
+        if cm.conditions:
+            conditions_str = " ".join(cm.conditions)
+            parts.append(f"--conditions {conditions_str}")
+        
+        if cm.transition_buffer > 0:
+            parts.append(f"--transition-buffer {cm.transition_buffer}")
     
-    # Add label if set
+    # ========================================================================
+    # Output Options
+    # ========================================================================
+    
     if config.label:
         parts.append(f"--label {config.label}")
     
-    # Join with spaces - each option on same line for clean display
+    # ========================================================================
+    # Derivatives Path
+    # ========================================================================
+    
+    if config.denoised_derivatives:
+        parts.append(f"--derivatives fmridenoiser=/path/to/fmridenoiser")
+    
+    # Join with spaces for clean, readable display
     return " ".join(parts)
 
 
@@ -549,8 +638,17 @@ def _generate_participant_report(
             subject_label += f"_run-{run}"
         
         # Build desc entity based on method and atlas/seeds
-        if config.method in ["roiToRoi", "roiToVoxel"]:
+        if config.method == "roiToRoi":
             desc = config.atlas if config.atlas else config.method
+        elif config.method == "roiToVoxel":
+            # For roiToVoxel, use the first ROI label as desc
+            if config.roi_label and len(config.roi_label) > 0:
+                desc = config.roi_label[0]
+            elif config.roi_atlas:
+                # Fallback to atlas name if no label somehow
+                desc = config.roi_atlas
+            else:
+                desc = config.method
         elif config.method in ["seedToSeed", "seedToVoxel"]:
             # Use seeds file name without extension
             if config.seeds_file:
@@ -623,7 +721,7 @@ def _generate_participant_report(
                 logger.debug(f"Using {len(seeds_names)} seeds already loaded for seedToVoxel")
                 seed_name_to_coords = {name: list(coord) for name, coord in zip(seeds_names, seeds_coords)}
                 logger.debug(f"Seeds available: {list(seed_name_to_coords.keys())}")
-            elif config.method == "roiToVoxel" and config.roi_masks:
+            elif config.method == "roiToVoxel" and (config.roi_masks or config.roi_atlas):
                 logger.debug(f"Using ROI masks for roiToVoxel")
             else:
                 logger.debug(f"No seeds/ROIs available - will use file names as labels")
@@ -650,9 +748,15 @@ def _generate_participant_report(
                         label = nifti_file.stem
                         seed_coords = None
                         seed_radius = None
-                elif config.method == "roiToVoxel" and config.roi_masks:
-                    # For roiToVoxel, use ROI mask names
-                    label = Path(config.roi_masks[0]).stem if config.roi_masks else nifti_file.stem
+                elif config.method == "roiToVoxel" and (config.roi_masks or config.roi_atlas):
+                    # For roiToVoxel, use ROI mask or atlas label
+                    if config.roi_masks:
+                        label = Path(config.roi_masks[0]).stem if config.roi_masks else nifti_file.stem
+                    else:
+                        # Extract ROI name from filename (roi-ROINAME pattern)
+                        import re
+                        roi_match = re.search(r'roi-([^_]+)', filename)
+                        label = roi_match.group(1) if roi_match else nifti_file.stem
                     seed_coords = None
                     seed_radius = None
                 else:
@@ -668,7 +772,10 @@ def _generate_participant_report(
             # Add each brain map to the report
             for nifti_file, label, seed_coords, seed_radius in zip(nifti_files, labels, seed_coords_list, seed_radius_list):
                 try:
-                    logger.debug(f"Adding brain map: label={label}, seed_coords={seed_coords}, seed_radius={seed_radius}")
+                    if config.method == "seedToVoxel":
+                        logger.debug(f"Adding brain map: label={label}, seed_coords={seed_coords}, seed_radius={seed_radius}")
+                    else:  # roiToVoxel
+                        logger.debug(f"Adding brain map: label={label}")
                     report.add_brain_map(nifti_file, label, seed_coords, seed_radius)
                     logger.debug(f"Added brain map to report: {label} ({nifti_file.name})")
                 except Exception as e:
@@ -1221,6 +1328,7 @@ def _compute_connectivity(
     atlas_labels: Optional[List[str]],
     atlas_coords: Optional[np.ndarray],
     logger: logging.Logger,
+    t_r: Optional[float] = None,
     denoised_func_path: Optional[Path] = None,
 ) -> Tuple[List[Path], Optional[Dict[str, np.ndarray]], Optional[List[str]]]:
     """Compute connectivity using the specified method.
@@ -1262,28 +1370,87 @@ def _compute_connectivity(
             output_paths.append(output_path)
     
     elif method == "roiToVoxel":
-        # Load ROI masks
-        for roi_path in config.roi_masks:
-            roi_img = nib.load(roi_path)
-            roi_name = Path(roi_path).stem
+        # Handle two approaches: file-based masks or atlas-based labels
+        from connectomix.connectivity.roi_to_voxel import load_roi_mask
+        from connectomix.connectivity.seed_to_voxel import find_masks_directory, load_brain_mask
+        
+        # Load brain mask to restrict GLM analysis to brain voxels
+        brain_mask_img = None
+        try:
+            masks_dir = find_masks_directory(denoised_func_path)
+            brain_mask_img = load_brain_mask(masks_dir, file_entities, logger)
+        except Exception as e:
+            if logger:
+                logger.warning(f"Could not load brain mask: {e}")
+            # Continue without brain mask - GLM will analyze all voxels
+        
+        if config.roi_masks:
+            # File-based ROIs - use provided roi_label for each mask
+            for i, roi_path in enumerate(config.roi_masks):
+                # Use the corresponding roi_label for this mask
+                roi_label = config.roi_label[i] if config.roi_label and i < len(config.roi_label) else Path(roi_path).stem
+                
+                # Use load_roi_mask to handle resampling to functional image space
+                # Pass None for roi_label since we're loading from file
+                roi_img, _ = load_roi_mask(
+                    roi_definition=roi_path,
+                    atlas_name=None,  # File-based, not atlas-based
+                    roi_label=None,
+                    target_img=denoised_img,  # Resample to match functional image
+                    logger=logger
+                )
+                
+                # Use user-provided label instead of filename
+                roi_name = roi_label
+                file_entities['roi'] = roi_name
+                
+                output_path = _get_output_path(
+                    output_dir, file_entities, roi_name, "effectSize", ".nii.gz",
+                    label=config.label, subfolder="connectivity_data"
+                )
+                
+                compute_roi_to_voxel(
+                    func_img=denoised_img,
+                    roi_mask=roi_img,
+                    roi_name=roi_name,
+                    output_path=output_path,
+                    brain_mask=brain_mask_img,
+                    logger=logger,
+                    t_r=t_r,
+                )
+                output_paths.append(output_path)
+        
+        elif config.roi_atlas and config.roi_label:
+            # Atlas-based ROIs
+            from connectomix.connectivity.roi_to_voxel import load_roi_mask
             
-            file_entities['roi'] = roi_name
-            
-            output_path = _get_output_path(
-                output_dir, file_entities, roi_name, "effectSize", ".nii.gz",
-                label=config.label, subfolder="connectivity_data"
-            )
-            
-            compute_roi_to_voxel(
-                func_img=denoised_img,
-                roi_mask=roi_img,
-                roi_name=roi_name,
-                output_path=output_path,
-                logger=logger,
-                denoised_func_path=denoised_func_path,
-                file_entities=file_entities,
-            )
-            output_paths.append(output_path)
+            for roi_label in config.roi_label:
+                # Load ROI mask from atlas
+                roi_img, roi_name = load_roi_mask(
+                    roi_definition=config.roi_atlas,
+                    atlas_name=config.roi_atlas,
+                    roi_label=roi_label,
+                    target_img=denoised_img,
+                    logger=logger,
+                )
+                
+                file_entities['roi'] = roi_name
+                
+                output_path = _get_output_path(
+                    output_dir, file_entities, roi_name, "effectSize", ".nii.gz",
+                    label=config.label, subfolder="connectivity_data"
+                )
+                
+                compute_roi_to_voxel(
+                    func_img=denoised_img,
+                    roi_mask=roi_img,
+                    roi_name=roi_name,
+                    output_path=output_path,
+                    brain_mask=brain_mask_img,
+                    logger=logger,
+                    t_r=t_r,
+                )
+                output_paths.append(output_path)
     
     elif method == "seedToSeed":
         output_path = _get_output_path(

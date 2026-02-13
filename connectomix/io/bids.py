@@ -7,6 +7,7 @@ import logging
 import glob
 
 from connectomix.io.paths import validate_bids_dir, validate_derivatives_dir
+from connectomix.utils.validation import sanitize_filename
 
 
 def create_bids_layout(
@@ -141,6 +142,8 @@ def build_bids_path(
             # Handle lists (convert to hyphen-separated string)
             if isinstance(value, list):
                 value = '-'.join(str(v) for v in value)
+            # Sanitize value to remove spaces and special characters that could cause issues
+            value = sanitize_filename(str(value))
             parts.append(f"{entity_name}-{value}")
     
     # Add suffix

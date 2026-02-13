@@ -88,6 +88,8 @@ class ParticipantConfig:
         seeds: List of seed definitions as dicts with 'name', 'x', 'y', 'z' keys
         radius: Sphere radius in mm (for seed methods)
         roi_masks: List of paths to ROI mask files (for roiToVoxel)
+        roi_atlas: Atlas name for ROI extraction (for roiToVoxel with atlas labels)
+        roi_label: ROI label(s) within atlas to extract (for roiToVoxel with atlas)
         atlas: Atlas name or "canica" (for roiToRoi)
         connectivity_kind: Type of connectivity measure
         n_components: Number of ICA components (for CanICA)
@@ -119,6 +121,8 @@ class ParticipantConfig:
     
     # Method-specific parameters - ROI-based
     roi_masks: Optional[List[Path]] = None
+    roi_atlas: Optional[str] = None
+    roi_label: Optional[List[str]] = None
     atlas: str = "schaefer2018n100"
     
     # Connectivity computation
@@ -134,6 +138,34 @@ class ParticipantConfig:
     
     # Temporal censoring configuration (deprecated - kept for backward compatibility)
     temporal_censoring: TemporalCensoringConfig = field(default_factory=TemporalCensoringConfig)
+    
+    def __post_init__(self) -> None:
+        """Post-initialization normalization of configuration values.
+        
+        Cleans up string fields by stripping whitespace, removing trailing 
+        commas, and normalizing other common parsing issues that can occur 
+        when loading configuration from CLI arguments or YAML files.
+        """
+        # Helper function to clean string values
+        def clean_string(value: Optional[str]) -> Optional[str]:
+            """Strip whitespace and trailing commas from a string."""
+            if value is None:
+                return None
+            # Strip whitespace and remove trailing commas
+            return value.strip().rstrip(',')
+        
+        # Clean string fields
+        self.method = clean_string(self.method)
+        self.atlas = clean_string(self.atlas)
+        self.roi_atlas = clean_string(self.roi_atlas)
+        self.label = clean_string(self.label)
+        self.connectivity_kind = clean_string(self.connectivity_kind)
+        
+        # Clean roi_label list items
+        if self.roi_label:
+            self.roi_label = [clean_string(label) for label in self.roi_label]
+            # Remove any None values that might have resulted
+            self.roi_label = [label for label in self.roi_label if label is not None]
     
     def validate(self) -> None:
         """Validate configuration parameters.
@@ -189,10 +221,34 @@ class ParticipantConfig:
                                 )
         
         if self.method == "roiToVoxel":
-            if self.roi_masks is None or len(self.roi_masks) == 0:
+            # Flexible ROI specification: either file paths OR atlas+label
+            # BUT roi_label is ALWAYS required (for file naming in reports)
+            has_mask_files = self.roi_masks is not None and len(self.roi_masks) > 0
+            has_atlas_label = (self.roi_atlas is not None and 
+                             self.roi_label is not None and len(self.roi_label) > 0)
+            
+            if not has_mask_files and not has_atlas_label:
                 validator.errors.append(
-                    f"roi_masks is required for method '{self.method}'"
+                    f"Method '{self.method}' requires either: "
+                    f"1) 'roi_masks' with 'roi_label' (one label per mask file), or "
+                    f"2) 'roi_atlas' with 'roi_label' for atlas-based extraction"
                 )
+            
+            # Ensure roi_label is provided in both cases
+            if not self.roi_label or len(self.roi_label) == 0:
+                validator.errors.append(
+                    f"Method '{self.method}' requires 'roi_label' for naming outputs. "
+                    f"Provide --roi-label on command line or roi_label in config."
+                )
+            
+            # If using roi_masks, warn if number of labels doesn't match number of masks
+            if has_mask_files and self.roi_label:
+                if len(self.roi_label) != len(self.roi_masks):
+                    validator.errors.append(
+                        f"Number of roi_labels ({len(self.roi_label)}) must match "
+                        f"number of roi_masks ({len(self.roi_masks)}). "
+                        f"Provide one label per mask file."
+                    )
         
         if self.method == "roiToRoi":
             if self.atlas is None:

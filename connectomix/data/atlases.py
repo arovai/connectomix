@@ -162,6 +162,9 @@ def get_atlas_info(atlas_name: str) -> Dict[str, Any]:
     Raises:
         ValueError: If atlas not found.
     """
+    # Clean up atlas name: remove whitespace and trailing commas
+    atlas_name = atlas_name.strip().rstrip(',')
+    
     if atlas_name not in ATLAS_REGISTRY:
         available = ", ".join(ATLAS_REGISTRY.keys())
         raise ValueError(
@@ -179,6 +182,7 @@ def load_atlas(atlas_name: str) -> Tuple[nib.Nifti1Image, List[str]]:
     
     Args:
         atlas_name: Atlas identifier from ATLAS_REGISTRY.
+                   Will be cleaned (whitespace/trailing commas removed).
     
     Returns:
         Tuple of (atlas_img, labels) where atlas_img is a NIfTI image
@@ -191,6 +195,10 @@ def load_atlas(atlas_name: str) -> Tuple[nib.Nifti1Image, List[str]]:
         >>> atlas_img, labels = load_atlas("schaefer_100")
         >>> print(f"Loaded atlas with {len(labels)} regions")
     """
+    # Clean atlas name to handle common parsing issues
+    # (whitespace, trailing commas from CLI arguments)
+    atlas_name = atlas_name.strip().rstrip(',')
+    
     if atlas_name not in ATLAS_REGISTRY:
         available = ", ".join(ATLAS_REGISTRY.keys())
         raise ValueError(
@@ -211,41 +219,58 @@ def load_atlas(atlas_name: str) -> Tuple[nib.Nifti1Image, List[str]]:
         # Fetch atlas
         atlas_data = fetch_func(**kwargs)
         
+        # Helper function to handle both file paths and image objects
+        def _get_atlas_image(maps_data):
+            """Load atlas image from either a path string or directly from Nifti1Image."""
+            if isinstance(maps_data, nib.Nifti1Image):
+                # Already a Nifti image object, return as-is
+                return maps_data
+            else:
+                # Assume it's a file path
+                return nib.load(maps_data)
+        
+        # Helper function to ensure labels are strings
+        def _get_labels(labels_data):
+            """Extract labels, handling bytes, arrays, and strings."""
+            if isinstance(labels_data, str):
+                return [labels_data]
+            elif hasattr(labels_data, "tolist"):
+                labels_data = labels_data.tolist()
+            
+            # Decode bytes to strings if necessary
+            if isinstance(labels_data, list):
+                return [l.decode() if isinstance(l, bytes) else l for l in labels_data]
+            else:
+                return [str(labels_data)]
+        
         # Extract image and labels based on atlas type
         if info["function"] == "fetch_atlas_aal":
-            atlas_img = nib.load(atlas_data.maps)
-            labels = atlas_data.labels
+            atlas_img = _get_atlas_image(atlas_data.maps)
+            labels = _get_labels(atlas_data.labels)
             
         elif info["function"] == "fetch_atlas_schaefer_2018":
-            atlas_img = nib.load(atlas_data.maps)
-            labels = atlas_data.labels
-            # Decode bytes to strings if necessary
-            labels = [l.decode() if isinstance(l, bytes) else l for l in labels]
+            atlas_img = _get_atlas_image(atlas_data.maps)
+            labels = _get_labels(atlas_data.labels)
             
         elif info["function"] == "fetch_atlas_harvard_oxford":
-            atlas_img = nib.load(atlas_data.maps)
-            labels = atlas_data.labels
+            atlas_img = _get_atlas_image(atlas_data.maps)
+            labels = _get_labels(atlas_data.labels)
             
         elif info["function"] == "fetch_atlas_destrieux_2009":
-            atlas_img = nib.load(atlas_data.maps)
-            labels = atlas_data.labels
-            labels = [l.decode() if isinstance(l, bytes) else l for l in labels]
+            atlas_img = _get_atlas_image(atlas_data.maps)
+            labels = _get_labels(atlas_data.labels)
             
         elif info["function"] == "fetch_atlas_difumo":
-            atlas_img = nib.load(atlas_data.maps)
-            labels = atlas_data.labels
+            atlas_img = _get_atlas_image(atlas_data.maps)
+            labels = _get_labels(atlas_data.labels)
             
         elif info["function"] == "fetch_atlas_msdl":
             # MSDL returns multiple maps, need special handling
-            atlas_img = nib.load(atlas_data.maps)
-            labels = atlas_data.labels
+            atlas_img = _get_atlas_image(atlas_data.maps)
+            labels = _get_labels(atlas_data.labels)
             
         else:
             raise ValueError(f"Unsupported fetch function: {info['function']}")
-        
-        # Ensure labels is a list of strings
-        if hasattr(labels, "tolist"):
-            labels = labels.tolist()
         
         logger.info(f"Loaded {len(labels)} regions from {atlas_name}")
         

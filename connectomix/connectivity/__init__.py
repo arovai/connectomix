@@ -5,7 +5,12 @@ from connectomix.connectivity.extraction import (
     extract_roi_timeseries,
 )
 from connectomix.connectivity.seed_to_voxel import compute_seed_to_voxel
-from connectomix.connectivity.roi_to_voxel import compute_roi_to_voxel
+from connectomix.connectivity.roi_to_voxel import (
+    compute_roi_to_voxel,
+    load_roi_mask,
+    compute_roi_to_voxel_flexible,
+    compute_multiple_rois_to_voxel_flexible,
+)
 from connectomix.connectivity.seed_to_seed import compute_seed_to_seed
 from connectomix.connectivity.roi_to_roi import compute_roi_to_roi
 from connectomix.connectivity.group_connectivity import (
@@ -20,6 +25,9 @@ __all__ = [
     "extract_roi_timeseries",
     "compute_seed_to_voxel",
     "compute_roi_to_voxel",
+    "load_roi_mask",
+    "compute_roi_to_voxel_flexible",
+    "compute_multiple_rois_to_voxel_flexible",
     "compute_seed_to_seed",
     "compute_roi_to_roi",
     # Group-level

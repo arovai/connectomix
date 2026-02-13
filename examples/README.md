@@ -9,6 +9,11 @@ This directory contains template configuration files demonstrating how to use Co
 - **`seed_to_voxel_inline_seeds.yaml`** - Seed-to-voxel analysis with seeds defined directly in the config
 - **`seed_to_seed_inline_seeds.yaml`** - Seed-to-seed analysis with seeds defined directly in the config
 
+### ROI-Based Methods
+
+- **`roi_to_voxel_atlas.yaml`** - ROI-to-voxel analysis with ROIs extracted from a standard atlas by label
+- **`roi_to_voxel_masks.yaml`** - ROI-to-voxel analysis with ROIs defined by binary mask files
+
 ### Seed-Based Methods with External TSV Files
 
 - **`seed_to_voxel_from_file.yaml`** - Seed-to-voxel analysis loading seeds from external TSV
@@ -96,6 +101,75 @@ LIPL	-45	-70	35
 - Coordinates are in MNI space (mm)
 - Both formats are functionally equivalent
 
+## ROI-Based Methods
+
+### ROI-to-Voxel Analysis
+
+ROI-to-voxel connectivity correlates a region-of-interest (ROI) with every voxel in the brain. 
+
+**Option 1: ROIs from Atlas Labels (Recommended)**
+
+Extract specific ROI regions from a standard atlas:
+
+```bash
+connectomix /path/to/bids /path/to/output participant \
+  --config roi_to_voxel_atlas.yaml \
+  --derivatives fmridenoiser=/path/to/fmridenoiser
+```
+
+**Benefits:**
+- Use standard, published atlases
+- No need to create/align mask files
+- Reproducible and shareable
+- Easy label-based specification
+
+**Example configuration:**
+```yaml
+method: "roiToVoxel"
+roi_atlas: "schaefer_100"
+roi_label:
+  - "7Networks_DMN_PCC"
+  - "7Networks_DMN_mPFC"
+```
+
+**Available atlases:**
+- `schaefer_100`, `schaefer_200`, `schaefer_400` (7 networks)
+- `schaefer_100_17`, `schaefer_200_17`, `schaefer_400_17` (17 networks)
+- `aal` (Automated Anatomical Labeling, 116 regions)
+- `harvard_oxford_cort`, `harvard_oxford_sub` (Harvard-Oxford)
+- `destrieux` (FreeSurfer-based, 148 regions)
+- `difumo_64`, `difumo_128` (Dictionary-based functional)
+- `msdl` (Multi-Subject Dictionary Learning, 39 regions)
+
+**Option 2: ROIs from Binary Mask Files**
+
+Use custom mask files when you have pre-defined ROI regions:
+
+```bash
+connectomix /path/to/bids /path/to/output participant \
+  --config roi_to_voxel_masks.yaml \
+  --derivatives fmridenoiser=/path/to/fmridenoiser
+```
+
+**Benefits:**
+- Use custom or subject-specific ROIs
+- Total control over ROI definition
+- Can combine manually-drawn and atlas-based masks
+
+**Example configuration:**
+```yaml
+method: "roiToVoxel"
+roi_masks:
+  - "/path/to/my_roi_1.nii.gz"
+  - "/path/to/my_roi_2.nii.gz"
+```
+
+**Mask file requirements:**
+- Binary NIfTI images (.nii or .nii.gz)
+- Should be in the same space as functional data
+- Values > 0 define the ROI region
+- Automatically resampled if needed to match functional image
+
 ## Common Parameters
 
 All templates support these common parameters:
@@ -148,6 +222,42 @@ connectomix /data/bids /data/output participant \
 ```bash
 connectomix /data/bids /data/output participant \
   --config seed_to_voxel_from_file.yaml \
+  --derivatives fmridenoiser=/path/to/fmridenoiser
+```
+
+### ROI-to-voxel with atlas labels
+
+```bash
+connectomix /data/bids /data/output participant \
+  --config roi_to_voxel_atlas.yaml \
+  --derivatives fmridenoiser=/path/to/fmridenoiser
+```
+
+### ROI-to-voxel with mask files
+
+```bash
+connectomix /data/bids /data/output participant \
+  --config roi_to_voxel_masks.yaml \
+  --derivatives fmridenoiser=/path/to/fmridenoiser
+```
+
+### Command-line ROI-to-voxel with atlas labels
+
+```bash
+connectomix /data/bids /data/output participant \
+  --method roiToVoxel \
+  --roi-atlas schaefer_100 \
+  --roi-label 7Networks_DMN_PCC 7Networks_DMN_mPFC \
+  --derivatives fmridenoiser=/path/to/fmridenoiser
+```
+
+### Command-line ROI-to-voxel with mask files
+
+```bash
+connectomix /data/bids /data/output participant \
+  --method roiToVoxel \
+  --roi-mask /path/to/putamen.nii.gz /path/to/caudate.nii.gz \
+  --roi-label putamen caudate \
   --derivatives fmridenoiser=/path/to/fmridenoiser
 ```
 
